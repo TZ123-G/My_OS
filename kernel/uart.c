@@ -27,18 +27,6 @@
 #define ReadReg(reg) (*(Reg(reg)))
 #define WriteReg(reg, v) (*(Reg(reg)) = (v))
 
-void uartputc_sync(int c)
-{
-    volatile uint8 *lsr = (volatile uint8 *)(UART0 + LSR);
-
-    // 等待发送寄存器为空
-    while ((*lsr & LSR_TX_IDLE) == 0)
-        ;
-
-    volatile uint8 *thr = (volatile uint8 *)(UART0 + THR);
-    *thr = c;
-}
-
 void uartinit(void)
 {
     // disable interrupts.

@@ -40,20 +40,6 @@ printptr(uint64 x)
         consputc(digits[x >> (sizeof(uint64) * 8 - 4)]);
 }
 
-// 清屏函数 - 使用 ANSI 转义序列
-void clear_screen(void)
-{
-    // \033[2J 清屏，\033[H 将光标移动到左上角
-    consputc('\033');
-    consputc('[');
-    consputc('2');
-    consputc('J');
-
-    consputc('\033');
-    consputc('[');
-    consputc('H');
-}
-
 // 简化版 printf，支持基本格式
 void printf(char *fmt, ...)
 {
@@ -106,14 +92,14 @@ void printf(char *fmt, ...)
     va_end(ap);
 }
 
-void printf_color(int fg, int bg, int attr, char *fmt, ...)
+void printf_color(int fg, int bg, char *fmt, ...)
 {
     va_list ap;
     int i, c;
     char *s;
 
     // 设置颜色
-    set_color(fg, bg, attr);
+    set_color(fg, bg);
 
     va_start(ap, fmt);
     for (i = 0; (c = fmt[i] & 0xff) != 0; i++)
@@ -160,7 +146,7 @@ void printf_color(int fg, int bg, int attr, char *fmt, ...)
     va_end(ap);
 
     // 重置颜色
-    set_color(-1, -1, ATTR_RESET);
+    set_color(-1, -1);
 }
 
 // 简化版 panic 函数
