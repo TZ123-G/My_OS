@@ -1,12 +1,20 @@
 #include "types.h"
 #include "memlayout.h"
 #include "riscv.h"
+#include "param.h"
+#include "printf.h"
 #include "defs.h"
 
 // 页表类型定义
 typedef uint64 pte_t;
 typedef uint64 *pagetable_t;
-
+// 页表统计信息
+struct pagetable_stats
+{
+    uint64 total_pt_pages;
+    uint64 total_mappings;
+    uint64 kernel_pt_pages;
+};
 // 全局内核页表
 pagetable_t kernel_pagetable;
 
@@ -24,7 +32,6 @@ pagetable_t kernel_pagetable;
 #else
 #define vm_debug(fmt, ...)
 #endif
-
 
 static struct pagetable_stats pt_stats;
 
@@ -373,6 +380,13 @@ void kvminit(void)
     if (mappages(kernel_pagetable, UART0, PGSIZE, UART0, PTE_R | PTE_W) < 0)
     {
         panic("kvminit: UART mapping failed");
+    }
+
+    // CLINT (core-local interruptor) - 包含 mtime/mtimecmp
+    // 映射 0x2000000 大小的设备区域（映射 64KB）
+    if (mappages(kernel_pagetable, CLINT, 0x10000, CLINT, PTE_R | PTE_W) < 0)
+    {
+        panic("kvminit: CLINT mapping failed");
     }
 
     vm_debug("Kernel page table initialized successfully\n");

@@ -13,10 +13,17 @@ CFLAGS += -Ikernel/
 # 源文件
 KERNEL_SRCS = \
         kernel/entry.S \
+		kernel/kernelvec.S \
         kernel/start.c \
         kernel/uart.c \
-		kernel/printf.c\
-		kernel/console.c\
+		kernel/printf.c \
+		kernel/console.c \
+		kernel/kalloc.c \
+		kernel/vm.c \
+		kernel/string.c \
+		kernel/spinlock.c \
+		kernel/trap.c \
+		kernel/proc.c \
         kernel/main.c
 
 # 目标文件

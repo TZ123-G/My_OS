@@ -6,6 +6,7 @@
 // 00001000 -- boot ROM, provided by qemu
 // 02000000 -- CLINT
 // 0C000000 -- PLIC
+#define CLINT 0x2000000L
 // 10000000 -- uart0
 // 10001000 -- virtio disk
 // 80000000 -- qemu's boot ROM loads the kernel here,
