@@ -11,12 +11,11 @@ SECTIONS
     *(.text.init)
     *(.text .text.*)
     
-    /* 移除 trampoline 相关代码 */
-    /* . = ALIGN(0x1000);
+    . = ALIGN(0x1000);
     _trampoline = .;
     *(trampsec)
     . = ALIGN(0x1000);
-    ASSERT(. - _trampoline == 0x1000, "error: trampoline larger than one page"); */
+    ASSERT(. - _trampoline == 0x1000, "error: trampoline larger than one page"); 
     
     PROVIDE(etext = .);
   }

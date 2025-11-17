@@ -33,6 +33,8 @@
 
 // 定时器中断
 #define MIE_MTIE (1L << 7)
+// C-only inline functions should be hidden from the assembler
+#ifndef __ASSEMBLER__
 static inline uint64
 r_sstatus(void)
 {
@@ -200,14 +202,6 @@ intr_get(void)
     uint64 x = r_sstatus();
     return (x & SSTATUS_SIE) != 0;
 }
-static inline uint64
-get_time(void)
-{
-    uint64 x;
-    asm volatile("rdtime %0" : "=r"(x));
-    return x;
-}
-
 // 添加 r_time 函数
 static inline uint64
 r_time(void)
@@ -217,6 +211,12 @@ r_time(void)
     return x;
 }
 
+/* 简化：让 get_time 调用 r_time，避免重复汇编模板 */
+static inline uint64
+get_time(void)
+{
+    return r_time();
+}
 // 添加 w_mscratch 函数
 static inline void
 w_mscratch(uint64 x)
@@ -268,4 +268,7 @@ csrc_sip(uint64 x)
 {
     asm volatile("csrc sip, %0" : : "r"(x));
 }
+
+#endif /* __ASSEMBLER__ */
+
 #endif

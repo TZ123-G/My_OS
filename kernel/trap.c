@@ -9,28 +9,26 @@
 // 外部汇编函数声明
 extern void kernelvec(void);
 extern void timervec(void);
-extern void machine_exception_handler(void);
-// machine mode exception handler helper (C)
-// NOTE: machine_exception_handler was a temporary debug helper; remove it to restore original flow.
 
 // 全局变量定义
 uint64 ticks = 0;
 struct spinlock tickslock;
 
-// M-mode 异常计数器，用于测试代码检测异常已被处理
-volatile uint64 mexception_count = 0;
-// 控制定时器中断处理时的打印（打印会严重影响性能测量）
-volatile int timer_verbose = 0;
-
-// 定时器 scratch 区域布局（与汇编 timervec 期望的偏移一致）
-// layout: saved regs at 0/8/16, then interval @24, and mtimecmp addr @32
+// 定时器相关结构 - 布局需与汇编 timervec 期望的偏移一致
+// 汇编中：
+//  sd a1, 0(a0)
+//  sd a2, 8(a0)
+//  sd a3, 16(a0)
+//  ld a1, 24(a0)  # interval
+//  ld a2, 32(a0)  # mtimecmp address (scratch)
+// 因此 C 侧结构需要在前面保留 3 个 8 字节的槽，然后是 interval 和 mtimecmp 地址
 struct timer_scratch
 {
-    uint64 saved0;   // offset 0
-    uint64 saved1;   // offset 8
-    uint64 saved2;   // offset 16
-    uint64 interval; // offset 24
-    uint64 mtimecmp; // offset 32
+    uint64 reserved0; // offset 0
+    uint64 reserved1; // offset 8
+    uint64 reserved2; // offset 16
+    uint64 interval;  // offset 24
+    uint64 mtimecmp;  // offset 32
 };
 
 struct timer_scratch timer_scratch;
@@ -66,7 +64,11 @@ void timer_set_next(void)
     uint64 next = r_time() + timer_scratch.interval;
     uint64 mcmp_addr = timer_scratch.mtimecmp; // 这是映射到 CLINT 的虚拟地址
     *(uint64 *)mcmp_addr = next;
-    // 注意：MTIP 由硬件（CLINT）根据 mtime/mtimecmp 设置，软件不应直接清除 MTIP 位。
+    // 读取回写入的值以验证
+    uint64 readback = *(uint64 *)mcmp_addr;
+    printf("timer_set_next: wrote next=%d readback=%d at addr=%p\n", (int)next, (int)readback, (void *)mcmp_addr);
+
+    // 注意：MTIP 是由硬件（CLINT）根据 mtime/mtimecmp 设置的，软件不应直接清除 mip 中的 MTIP 位。
 }
 
 // 定时器初始化
@@ -74,16 +76,18 @@ void timer_init(void)
 {
     // 每个CPU定时器中断间隔 (QEMU使用10MHz时钟)
     // 将默认间隔缩短以便测试更快看到中断（从 10,000,000 ~1s 缩短为 1,000,000 ~0.1s）
-    uint64 interval = 10000; // 更短间隔以便在短测量内触发中断
+    uint64 interval = 1000000; // 快速测试用约0.1秒
 
     // 设置机器模式定时器向量
     w_mtvec((uint64)timervec);
 
-    // 准备定时器 scratch 区域
-    timer_scratch.saved0 = 0;
-    timer_scratch.saved1 = 0;
-    timer_scratch.saved2 = 0;
+    // 准备定时器scratch区域
+    timer_scratch.reserved0 = 0;
+    timer_scratch.reserved1 = 0;
+    timer_scratch.reserved2 = 0;
     timer_scratch.interval = interval;
+    // 对于单核/默认 hart 0，mtimecmp 地址就是 CLINT_MTIMECMP
+    // 如果需要支持多核，应使用 hartid: CLINT_MTIMECMP + 8*hartid
     timer_scratch.mtimecmp = CLINT_MTIMECMP; // hart 0
 
     // 设置mscratch指向我们的scratch区域 (machine 模式使用物理地址，
@@ -125,124 +129,38 @@ void timer_interrupt_handler(void)
     acquire(&tickslock);
     ticks++;
 
-    // 只有在调试模式下才打印（打印会显著影响测量）
-    if (timer_verbose)
-        printf("timer_interrupt_handler: ticks=%d\n", (int)ticks);
-
-    // wakeup(&ticks);
-    release(&tickslock);
-
-    // 触发调度
-    // yield();
+    // 每100个tick打印一次（调试用）
+    // 调试：每次中断都打印 ticks（便于观察）
+    printf("timer_interrupt_handler: ticks=%d\n"); // 设置下一次定时器中断
+    timer_set_next();
 }
 
-// 机器模式异常处理器：当在 M-mode 执行非法指令或访问错误时，timervec
-// 会把非定时中断/异常分发到这里。此处理器打印信息并把 mepc 前进，
-// 以便测试可以继续执行后续代码。
-void machine_exception_handler(void)
-{
-    uint64 mcause = r_mcause();
-    uint64 mepc = r_mepc();
-
-    // 如果 mepc 为 0，说明异常发生位置不可用或无效，记录并忽略以避免误恢复
-    if (mepc == 0)
-    {
-        printf("machine_exception_handler: unexpected mepc==0 mcause=%p - ignoring\n", mcause);
-        return;
-    }
-
-    printf("machine_exception_handler: mcause=%p mepc=%p\n", mcause, mepc);
-
-    // 如果是异常（而不是中断）
-    if ((mcause & 0x8000000000000000L) == 0)
-    {
-        int code = mcause & 0xff;
-        if (code == CAUSE_ILLEGAL_INSTRUCTION)
-        {
-            printf("trap: illegal instruction (M-mode) at %p\n", mepc);
-            w_mepc(mepc + 4);
-            mexception_count++;
-            return;
-        }
-        else if (code == CAUSE_LOAD_PAGE_FAULT)
-        {
-            printf("trap: load page fault (M-mode) at %p\n", mepc);
-            w_mepc(mepc + 4);
-            mexception_count++;
-            return;
-        }
-        else if (code == CAUSE_STORE_PAGE_FAULT)
-        {
-            printf("trap: store page fault (M-mode) at %p\n", mepc);
-            w_mepc(mepc + 4);
-            mexception_count++;
-            return;
-        }
-        else
-        {
-            printf("machine unexpected exception: code=%d mepc=%p\n", code, mepc);
-            w_mepc(mepc + 4);
-            return;
-        }
-    }
-
-    // 对于中断，暂不特殊处理，直接返回；timervec 的中断路径会继续
-}
-
-// common trap handling logic, callable from kerneltrap() and machine_exception_handler
+// kerneltrap: kernel-mode trap handler called from kernelvec.S
 void kerneltrap(void)
 {
     uint64 scause = r_scause();
     uint64 sepc = r_sepc();
 
-    // 调试输出：打印 scause/irq 信息，观察陷阱是否到达
-    printf("kerneltrap: scause=%p sepc=%p\n", scause, sepc);
-
+    // 简单处理：打印并处理 supervisor 授权的中断（如 S-mode timer/software）
     if (scause & 0x8000000000000000L)
     {
         int irq = scause & 0xff;
         if (irq == IRQ_S_TIMER || irq == IRQ_S_SOFT)
         {
-            // 监督模式定时器或软件中断
             timer_interrupt_handler();
+            return;
         }
         else
         {
-            ;
+            printf("kerneltrap: unhandled interrupt irq=%d scause=%p sepc=%p\n", irq, scause, sepc);
+            panic("kerneltrap: unhandled interrupt");
         }
-    }
-    else if (scause == CAUSE_USER_ECALL || scause == CAUSE_SUPERVISOR_ECALL)
-    {
-        // 系统调用
-        printf("trap: system call\n");
-        w_sepc(sepc + 4); // 前进到下一个指令
-    }
-    else if (scause == CAUSE_ILLEGAL_INSTRUCTION)
-    {
-        printf("trap: illegal instruction at %p\n", sepc);
-        w_sepc(sepc + 4);
-    }
-    else if (scause == CAUSE_LOAD_PAGE_FAULT)
-    {
-        printf("trap: load page fault at %p\n", sepc);
-        // 跳过导致异常的指令，避免死循环（测试环境中直接跳过以便继续执行后续测试）
-        w_sepc(sepc + 4);
-    }
-    else if (scause == CAUSE_STORE_PAGE_FAULT)
-    {
-        printf("trap: store page fault at %p\n", sepc);
-        // 跳过导致异常的指令，避免死循环（测试环境中直接跳过以便继续执行后续测试）
-        w_sepc(sepc + 4);
     }
     else
     {
-        printf("unexpected trap: scause %p sepc=%p\n", scause, sepc);
-        for (;;)
-            ;
+        printf("kerneltrap: exception scause=%p sepc=%p\n", scause, sepc);
+        panic("kerneltrap: exception");
     }
-
-    // 设置下一次定时器中断
-    timer_set_next();
 }
 
 // 中断初始化
@@ -276,4 +194,31 @@ void trap_init(void)
     printf("trap: interrupt system initialized\n");
     printf("trap: stvec = %p\n", kernelvec);
     printf("trap: mtvec = %p\n", timervec);
+}
+
+// return-to-user path: set up sstatus/sepc/satp and jump to trampoline userret
+void usertrapret(void)
+{
+    struct proc *p = myproc();
+
+    // set S Previous Privilege mode to User, enable interrupts in user mode
+    uint64 x = r_sstatus();
+    x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode
+    x |= SSTATUS_SPIE; // enable interrupts in user mode
+    w_sstatus(x);
+
+    // set S Exception Program Counter to the saved user pc.
+    w_sepc(p->trapframe->epc);
+
+    // give the trampoline the user page table to switch to (satp in a0)
+    uint64 satp = MAKE_SATP(p->pagetable);
+    // compute address of trampoline userret entry
+    extern char trampoline[];
+    extern char userret[];
+    uint64 userret_addr = (uint64)trampoline + ((uint64)userret - (uint64)trampoline);
+
+    // jump to trampoline's userret with satp in a0
+    register uint64 a0 asm("a0") = satp;
+    register uint64 t1 asm("t1") = userret_addr;
+    asm volatile("mv a0, %0; jr %1" : : "r"(a0), "r"(t1));
 }

@@ -96,8 +96,6 @@ timervec:
     li t1, 0x8000000000000000
     and t2, t0, t1
     bnez t2, 1f
-    # 异常 -> 交给 C 层处理并返回
-    call machine_exception_handler
     ld a3, 16(a0)
     ld a2, 8(a0)
     ld a1, 0(a0)

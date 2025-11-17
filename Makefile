@@ -14,6 +14,8 @@ CFLAGS += -Ikernel/
 KERNEL_SRCS = \
         kernel/entry.S \
 		kernel/kernelvec.S \
+	    kernel/trampoline.S \
+		kernel/swtch.S \
         kernel/start.c \
         kernel/uart.c \
 		kernel/printf.c \
@@ -24,6 +26,7 @@ KERNEL_SRCS = \
 		kernel/spinlock.c \
 		kernel/trap.c \
 		kernel/proc.c \
+		kernel/process_api.c \
         kernel/main.c
 
 # 目标文件

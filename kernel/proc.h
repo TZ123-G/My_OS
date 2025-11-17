@@ -1,4 +1,6 @@
-#include "defs.h"
+#ifndef _PROC_H_
+#define _PROC_H_
+#include "vm.h"
 // Saved registers for kernel context switches.
 struct context
 {
@@ -28,7 +30,6 @@ struct cpu
     int noff;               // Depth of push_off() nesting.
     int intena;             // Were interrupts enabled before push_off()?
 };
-
 
 // per-process data for the trap handling code in trampoline.S.
 // sits in a page by itself just under the trampoline page in the
@@ -113,24 +114,25 @@ struct proc
     pagetable_t pagetable;       // User page table
     struct trapframe *trapframe; // data page for trampoline.S
     struct context context;      // swtch() here to run process
-    //struct file *ofile[NOFILE];  // Open files
-    struct inode *cwd;           // Current directory
-    char name[16];               // Process name (debugging)
+    // struct file *ofile[NOFILE];  // Open files
+    struct inode *cwd; // Current directory
+    char name[16];     // Process name (debugging)
 };
 
-// 进程调度相关函数声明
-void yield(void);
-void wakeup(void *chan);
-void sleep(void *chan, struct spinlock *lk);
-
-// 进程相关函数声明
-struct proc *myproc(void);
-void exit(int status);
-int kill(int pid);
-int wait(uint64 *addr);
-
-// 进程初始化
+// 进程管理函数
 void procinit(void);
+struct proc *myproc(void);
+struct proc *allocproc(void);
+int fork(void);
+void exit(int);
+int wait(uint64);
+int kill(int);
+void setproc(struct proc *);
 
-// 调度器
+// 调度相关函数
 void scheduler(void) __attribute__((noreturn));
+void yield(void);
+void sleep(void *, struct spinlock *);
+void wakeup(void *);
+
+#endif

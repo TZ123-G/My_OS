@@ -1,34 +1,65 @@
-// kernel/proc.c - 单核简化版进程管理
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "vm.h"
+#include "printf.h"
 #include "defs.h"
 
-// 单核系统只需要一个CPU结构
+// 局部用户内存写入助手：用现有的 walkaddr + memmove 实现 copyout
+static int
+copyout_user(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
+{
+    uint64 n, va0, pa0;
+
+    while (len > 0)
+    {
+        va0 = PGROUNDDOWN(dstva);
+        if (va0 >= MAXVA)
+            return -1;
+
+        pa0 = walkaddr(pagetable, va0);
+        if (pa0 == 0)
+            return -1;
+
+        n = PGSIZE - (dstva - va0);
+        if (n > len)
+            n = len;
+        memmove((void *)(pa0 + (dstva - va0)), src, n);
+
+        len -= n;
+        src += n;
+        dstva = va0 + PGSIZE;
+    }
+    return 0;
+}
+
 struct cpu cpu;
-
-// 进程表
 struct proc proc[NPROC];
-
-// 当前运行的进程
-struct proc *current_proc;
-
-// 进程锁
 struct spinlock proc_lock;
+struct spinlock wait_lock;
 
 // 初始化进程系统
 void procinit(void)
 {
     initlock(&proc_lock, "proc_lock");
-    // 初始化所有进程为UNUSED状态
+    initlock(&wait_lock, "wait_lock");
+
     for (int i = 0; i < NPROC; i++)
     {
+        initlock(&proc[i].lock, "proc");
         proc[i].state = UNUSED;
+        proc[i].kstack = 0;
+        proc[i].trapframe = 0;
+        proc[i].pagetable = 0;
+        proc[i].sz = 0;
+        proc[i].pid = 0;
+        proc[i].parent = 0;
+        proc[i].name[0] = 0;
+        proc[i].killed = 0;
     }
-    return;
 }
 
 // 获取当前进程
@@ -36,93 +67,350 @@ struct proc *
 myproc(void)
 {
     push_off();
-    struct proc *p = current_proc;
+    struct cpu *c = &cpu;
+    struct proc *p = c->proc;
     pop_off();
     return p;
 }
 
-// 分配PID
-int allocpid()
+// 设置当前运行的进程
+void setproc(struct proc *p)
 {
-    static int next_pid = 1;
-    int pid;
+    push_off();
+    cpu.proc = p;
+    pop_off();
+}
+
+// 分配进程结构
+struct proc *
+allocproc(void)
+{
+    struct proc *p;
 
     acquire(&proc_lock);
-    pid = next_pid++;
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+        acquire(&p->lock);
+        if (p->state == UNUSED)
+        {
+            goto found;
+        }
+        else
+        {
+            release(&p->lock);
+        }
+    }
+    release(&proc_lock);
+    return 0;
+
+found:
+    // 分配进程ID
+    static int nextpid = 1;
+    p->pid = nextpid++;
+
+    // 分配内核栈
+    if ((p->kstack = (uint64)alloc_page()) == 0)
+    {
+        release(&p->lock);
+        release(&proc_lock);
+        return 0;
+    }
+
+    // 分配陷阱帧
+    p->trapframe = (struct trapframe *)(p->kstack + PGSIZE - sizeof(*p->trapframe));
+
+    // 设置上下文，返回到forkret
+    memset(&p->context, 0, sizeof(p->context));
+    p->context.ra = (uint64)forkret;
+    p->context.sp = p->kstack + PGSIZE;
+
+    release(&proc_lock);
+    return p;
+}
+
+// 进程创建
+int fork(void)
+{
+    struct proc *np;
+    struct proc *p = myproc();
+
+    // 分配新进程
+    if ((np = allocproc()) == 0)
+    {
+        return -1;
+    }
+
+    // 复制用户内存：使用已有的 copy_pagetable_mapping 来复制映射
+    if (copy_pagetable_mapping(p->pagetable, np->pagetable, 0, p->sz) < 0)
+    {
+        freeproc(np);
+        release(&np->lock);
+        return -1;
+    }
+    np->sz = p->sz;
+
+    // 复制陷阱帧
+    *(np->trapframe) = *(p->trapframe);
+    np->trapframe->a0 = 0; // 子进程返回0
+
+    // 设置父进程
+    np->parent = p;
+
+    // 复制进程名（没有 safestrcpy 时使用 strncpy 并确保 NUL 结尾）
+    strncpy(np->name, p->name, sizeof(p->name));
+    np->name[sizeof(p->name) - 1] = '\0';
+
+    // 标记为可运行
+    acquire(&proc_lock);
+    np->state = RUNNABLE;
+    release(&np->lock);
     release(&proc_lock);
 
-    return pid;
+    return np->pid;
+}
+
+// 进程退出
+void exit(int status)
+{
+    struct proc *p = myproc();
+
+    if (p == &proc[1]) // init进程不能退出
+        panic("init exiting");
+    // 释放用户内存与 trampoline 映射（用 unmap_page 清除单页映射）
+    if (p->pagetable)
+        unmap_page(p->pagetable, TRAMPOLINE);
+    if (p->kstack)
+        free_page((void *)p->kstack);
+    p->kstack = 0;
+    p->sz = 0;
+    p->pagetable = 0;
+
+    // 设置退出状态
+    p->xstate = status;
+    p->state = ZOMBIE;
+
+    // 唤醒父进程
+    acquire(&wait_lock);
+    wakeup(p->parent);
+    release(&wait_lock);
+
+    // 调度其他进程
+    for (;;)
+    {
+        yield();
+    }
+}
+
+// 等待子进程退出
+int wait(uint64 addr)
+{
+    struct proc *pp;
+    int havekids, pid;
+    struct proc *p = myproc();
+
+    acquire(&wait_lock);
+
+    for (;;)
+    {
+        havekids = 0;
+        for (pp = proc; pp < &proc[NPROC]; pp++)
+        {
+            if (pp->parent == p)
+            {
+                acquire(&pp->lock);
+                if (pp->state == ZOMBIE)
+                {
+                    pid = pp->pid;
+                    if (addr != 0 && copyout_user(p->pagetable, addr, (char *)&pp->xstate, sizeof(pp->xstate)) < 0)
+                    {
+                        release(&pp->lock);
+                        release(&wait_lock);
+                        return -1;
+                    }
+                    freeproc(pp);
+                    release(&pp->lock);
+                    release(&wait_lock);
+                    return pid;
+                }
+                release(&pp->lock);
+                havekids = 1;
+            }
+        }
+
+        if (!havekids || p->killed)
+        {
+            release(&wait_lock);
+            return -1;
+        }
+
+        sleep(p, &wait_lock);
+    }
+}
+
+// 杀死进程
+int kill(int pid)
+{
+    struct proc *p;
+
+    acquire(&proc_lock);
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+        acquire(&p->lock);
+        if (p->pid == pid)
+        {
+            p->killed = 1;
+            if (p->state == SLEEPING)
+            {
+                p->state = RUNNABLE;
+            }
+            release(&p->lock);
+            release(&proc_lock);
+            return 0;
+        }
+        release(&p->lock);
+    }
+    release(&proc_lock);
+    return -1;
 }
 
 // 释放进程资源
-static void
-freeproc(struct proc *p)
+void freeproc(struct proc *p)
 {
-    // 简化实现，实际系统中需要释放更多资源
+    // The trapframe resides in the kernel stack page (allocated as p->kstack)
+    // and must not be freed separately. Only free the page table if present.
+    p->trapframe = 0;
+
+    if (p->pagetable)
+        proc_freepagetable(p->pagetable, p->sz);
+
+    p->pagetable = 0;
+    p->sz = 0;
+    p->pid = 0;
+    p->parent = 0;
+    p->name[0] = 0;
+    p->killed = 0;
+    p->xstate = 0;
     p->state = UNUSED;
 }
 
-// 唤醒在chan上等待的所有进程
-void wakeup(void *chan)
+// 释放进程页表以及用户内存页（如果有）
+void proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
-    // 在单核系统中，简单实现
-    // 实际系统中需要遍历进程表找到等待在chan上的进程
-    // 这里暂时为空实现
+    // 遍历用户虚拟地址空间，释放所有叶子页并清除映射
+    for (uint64 a = 0; a < sz; a += PGSIZE)
+    {
+        pte_t *pte = walk_lookup(pagetable, a);
+        if (pte && (*pte & PTE_V))
+        {
+            uint64 pa = PTE2PA(*pte);
+            *pte = 0;
+            free_page((void *)pa);
+        }
+    }
+
+    // 释放页表结构本身
+    destroy_pagetable(pagetable);
 }
 
 // 进程睡眠
 void sleep(void *chan, struct spinlock *lk)
 {
-    // 简化实现
-    // 实际系统中需要：
-    // 1. 释放传入的锁lk
-    // 2. 设置进程状态为SLEEPING并设置chan
-    // 3. 调用调度器
-    // 4. 被唤醒后重新获取锁lk
-    // 这里暂时为空实现
+    struct proc *p = myproc();
+
+    acquire(&p->lock);
+    release(lk);
+
+    p->chan = chan;
+    p->state = SLEEPING;
+
+    sched();
+
+    p->chan = 0;
+    release(&p->lock);
+    acquire(lk);
+}
+
+// 唤醒进程
+void wakeup(void *chan)
+{
+    struct proc *p;
+
+    acquire(&proc_lock);
+    for (p = proc; p < &proc[NPROC]; p++)
+    {
+        if (p != myproc())
+        {
+            acquire(&p->lock);
+            if (p->state == SLEEPING && p->chan == chan)
+            {
+                p->state = RUNNABLE;
+            }
+            release(&p->lock);
+        }
+    }
+    release(&proc_lock);
 }
 
 // 让出CPU
 void yield(void)
 {
-    // 简化实现
-    // 实际系统中需要：
-    // 1. 设置进程状态为RUNNABLE
-    // 2. 调用调度器
-    // 这里暂时为空实现
+    struct proc *p = myproc();
+    acquire(&p->lock);
+    p->state = RUNNABLE;
+    sched();
+    release(&p->lock);
 }
 
-// 杀死指定PID的进程
-int kill(int pid)
+// 调度当前进程
+void sched(void)
 {
-    // 简化实现
-    return -1;
+    struct proc *p = myproc();
+
+    if (!holding(&p->lock))
+        panic("sched p->lock");
+    if (cpu.noff != 1)
+        panic("sched locks");
+    if (p->state == RUNNING)
+        panic("sched running");
+    if (intr_get())
+        panic("sched interruptible");
+
+    swtch(&p->context, &cpu.context);
 }
 
-// 退出当前进程
-void exit(int status)
+// fork返回，切换到用户空间
+void forkret(void)
 {
-    // 简化实现
-    for (;;)
-        ;
+    release(&myproc()->lock);
+
+    // 第一次返回到用户空间
+    usertrapret();
 }
 
-// 等待子进程退出
-int wait(uint64 *addr)
-{
-    // 简化实现
-    return -1;
-}
-
-// 调度器（单核简化版）
+// 调度器
 void scheduler(void)
 {
-    // 简化实现
-    // 实际系统中需要：
-    // 1. 循环查找RUNNABLE状态的进程
-    // 2. 切换到选中的进程运行
+    struct proc *p;
+    struct cpu *c = &cpu;
+
+    c->proc = 0;
     for (;;)
     {
-        // 空循环
+        intr_on();
+
+        acquire(&proc_lock);
+        for (p = proc; p < &proc[NPROC]; p++)
+        {
+            acquire(&p->lock);
+            if (p->state == RUNNABLE)
+            {
+                p->state = RUNNING;
+                c->proc = p;
+                swtch(&c->context, &p->context);
+                c->proc = 0;
+            }
+            release(&p->lock);
+        }
+        release(&proc_lock);
     }
 }
