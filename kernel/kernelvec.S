@@ -114,11 +114,8 @@ timervec:
     li a1, 2          # SSIP bit
     csrs sip, a1
 
-    # 直接在 machine 模式下增加全局 ticks 以确保测试可以感知中断到达
-    la t0, ticks
-    ld t1, 0(t0)
-    addi t1, t1, 1
-    sd t1, 0(t0)
+    # 调用 C 层钩子以便可选性地在 M-mode 递增 ticks（由 mmode_tick_hack 控制）
+    call mmode_tick_hook
 
     # 恢复寄存器
     ld a3, 16(a0)

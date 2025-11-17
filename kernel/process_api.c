@@ -17,6 +17,9 @@ void kernel_thread_trampoline(void)
     struct proc *p = myproc();
     if (!p)
         return;
+    // If the scheduler switched to this kernel thread with p->lock held,
+    // release it here (mirror what forkret does for fork-created procs).
+    release(&p->lock);
 
     void (*fn)(void) = (void (*)(void))p->trapframe->a0;
     if (fn)

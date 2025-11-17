@@ -31,6 +31,8 @@ struct cpu
     int intena;             // Were interrupts enabled before push_off()?
 };
 
+struct cpu *mycpu(void);
+
 // per-process data for the trap handling code in trampoline.S.
 // sits in a page by itself just under the trampoline page in the
 // user page table. not specially mapped in the kernel page table.

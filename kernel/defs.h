@@ -67,6 +67,7 @@ void usertrapret(void);
 
 // proc.c
 struct proc *myproc(void);
+struct cpu *mycpu(void);
 void procinit(void);
 void scheduler(void);
 void yield(void);

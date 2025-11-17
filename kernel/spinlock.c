@@ -9,10 +9,9 @@
 struct cpu *
 mycpu(void)
 {
-    // 简化版本：假设单核，返回全局CPU结构
-    // 在多核系统中，这里会通过tp寄存器获取hartid
-    static struct cpu c;
-    return &c;
+    // 返回在 proc.c 中定义的全局 cpu 结构（单核实现）
+    extern struct cpu cpu;
+    return &cpu;
 }
 
 // 初始化锁
@@ -93,4 +92,3 @@ int holding(struct spinlock *lk)
     pop_off();
     return r;
 }
-

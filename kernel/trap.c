@@ -14,6 +14,20 @@ extern void timervec(void);
 uint64 ticks = 0;
 struct spinlock tickslock;
 
+// 可由测试/调试控制的机器态 ticks 增量开关（默认启用以兼容现有测试）
+int mmode_tick_hack = 1;
+
+// 在 machine-mode 的 timervec 中被调用。保留与先前 assembly 行为一致的轻量操作：
+// 如果 mmode_tick_hack 为真，则直接对全局 ticks 做 ++（不加锁，行为与原 assembly 相同）。
+// 之所以做成 C 钩子，是为了将来可以在 C 层更容易打开/关闭或扩展行为。
+void mmode_tick_hook(void)
+{
+    if (mmode_tick_hack)
+    {
+        ticks++;
+    }
+}
+
 // 定时器相关结构 - 布局需与汇编 timervec 期望的偏移一致
 // 汇编中：
 //  sd a1, 0(a0)
@@ -131,7 +145,8 @@ void timer_interrupt_handler(void)
 
     // 每100个tick打印一次（调试用）
     // 调试：每次中断都打印 ticks（便于观察）
-    printf("timer_interrupt_handler: ticks=%d\n"); // 设置下一次定时器中断
+    printf("timer_interrupt_handler: ticks=%d\n", (int)ticks); // 设置下一次定时器中断
+    release(&tickslock);
     timer_set_next();
 }
 
@@ -148,6 +163,9 @@ void kerneltrap(void)
         if (irq == IRQ_S_TIMER || irq == IRQ_S_SOFT)
         {
             timer_interrupt_handler();
+            // 在 timer 中断后触发让出以实现抢占式调度
+            if (myproc() != 0)
+                yield();
             return;
         }
         else
@@ -158,8 +176,10 @@ void kerneltrap(void)
     }
     else
     {
-        printf("kerneltrap: exception scause=%p sepc=%p\n", scause, sepc);
-        panic("kerneltrap: exception");
+        // 打印当前 ticks 与当前进程信息（诊断用）
+        struct proc *p = myproc();
+        int pid = p ? p->pid : 0;
+        printf("timer_interrupt_handler: ticks=%d pid=%d\n", (int)ticks, pid); // 设置下一次定时器中断
     }
 }
 

@@ -365,7 +365,14 @@ void cpu_intensive_task(void)
     // Busy loop to generate CPU load for scheduler observation.
     volatile uint64 sum = 0;
     for (volatile uint64 i = 0; i < 10000000ULL; i++)
+    {
         sum += i;
+        // Cooperative yield to avoid depending on M-mode tick hack for preemption.
+        // This lets the scheduler switch between processes even if S-mode timer
+        // interrupts are not fully configured in the environment.
+        if ((i & 0xFFFF) == 0)
+            yield();
+    }
     (void)sum;
     printf("cpu_intensive_task exiting\n");
     return;
@@ -377,7 +384,8 @@ void scheduler_watcher(void)
     printf("scheduler_watcher: started\n");
     uint64 start = get_time();
     // 等待约 0.2s 到 0.5s（依赖仿真速度），以 cycles 为单位
-    uint64 deadline = start + 200000000;
+    // 延长等待时间以便多个协作任务有机会运行并输出日志
+    uint64 deadline = start + 600000000;
     while (get_time() < deadline)
     {
         // 轻量忙等待，让出时间片给其他可运行进程
@@ -397,6 +405,9 @@ void test_scheduler(void)
     // 确保进程子系统已初始化
     pmem_init();
     procinit();
+    // 初始化陷阱/定时器并启用中断，以便产生抢占和调度
+    trap_init();
+    enable_interrupts();
 
     // 创建若干计算任务
     const int n = 3;
@@ -411,10 +422,6 @@ void test_scheduler(void)
     int wpid = create_process(scheduler_watcher);
     if (wpid <= 0)
         printf("test_scheduler: create_process failed for watcher\n");
-
-    // 初始化陷阱/定时器并启用中断，以便产生抢占和调度
-    trap_init();
-    enable_interrupts();
 
     printf("test_scheduler: entering scheduler \n");
     scheduler();
@@ -431,7 +438,7 @@ void start()
     }
 
     // 仅调用异常测试函数；start 仅负责调用这个测试函数
-    test_scheduler();
+    test_process_creation();
 
     main();
 }

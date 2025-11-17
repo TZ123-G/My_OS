@@ -406,7 +406,10 @@ void scheduler(void)
             {
                 p->state = RUNNING;
                 c->proc = p;
+                release(&proc_lock);
                 swtch(&c->context, &p->context);
+                // re-acquire proc_lock after coming back from the process
+                acquire(&proc_lock);
                 c->proc = 0;
             }
             release(&p->lock);
