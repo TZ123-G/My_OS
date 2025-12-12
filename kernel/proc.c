@@ -176,29 +176,24 @@ void exit(int status)
 
     if (p == &proc[1]) // init进程不能退出
         panic("init exiting");
-    // 释放用户内存与 trampoline 映射（用 unmap_page 清除单页映射）
-    if (p->pagetable)
-        unmap_page(p->pagetable, TRAMPOLINE);
-    if (p->kstack)
-        free_page((void *)p->kstack);
-    p->kstack = 0;
-    p->sz = 0;
-    p->pagetable = 0;
+    // 不在此处释放内核栈或页表：资源应由父进程在 wait()/freeproc() 中回收。
+    // 在调用 sched() 前必须持有 p->lock（sched() 要求如此）。
+    acquire(&p->lock);
 
-    // 设置退出状态
+    // 设置退出状态并标记为 ZOMBIE
     p->xstate = status;
     p->state = ZOMBIE;
 
-    // 唤醒父进程
+    // 唤醒父进程让其可以在 wait() 中收集此子进程
     acquire(&wait_lock);
     wakeup(p->parent);
     release(&wait_lock);
 
-    // 调度其他进程
-    for (;;)
-    {
-        yield();
-    }
+    // 切换到其他进程（sched 要求 p->lock 被持有）
+    sched();
+
+    // sched() 不应返回；若返回则为严重错误
+    panic("exit: sched returned");
 }
 
 // 等待子进程退出
@@ -416,4 +411,35 @@ void scheduler(void)
         }
         release(&proc_lock);
     }
+}
+
+// 调试：打印进程表中所有非 UNUSED 条目，包含可读状态名
+void debug_proc(void)
+{
+    static const char *state_names[] = {
+        "UNUSED",
+        "USED",
+        "SLEEPING",
+        "RUNNABLE",
+        "RUNNING",
+        "ZOMBIE",
+    };
+
+    printf("=== Process Table ===\n");
+
+    acquire(&proc_lock);
+    for (int i = 0; i < NPROC; i++)
+    {
+        struct proc *p = &proc[i];
+        acquire(&p->lock);
+        if (p->state != UNUSED)
+        {
+            const char *s = "?";
+            if (p->state >= UNUSED && p->state <= ZOMBIE)
+                s = state_names[p->state];
+            printf("PID:%d State:%s Name:%s\n", p->pid, s, p->name);
+        }
+        release(&p->lock);
+    }
+    release(&proc_lock);
 }

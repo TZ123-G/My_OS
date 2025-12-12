@@ -27,6 +27,7 @@ KERNEL_SRCS = \
 		kernel/trap.c \
 		kernel/proc.c \
 		kernel/process_api.c \
+		kernel/sync_test.c \
         kernel/main.c
 
 # 目标文件

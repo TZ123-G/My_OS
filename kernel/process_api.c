@@ -57,6 +57,35 @@ int create_process(void (*entry)(void))
     // At this point allocproc returns with p->lock held.
     // Store the entry function pointer into trapframe->a0 so trampoline can read it.
     p->trapframe->a0 = (uint64)entry;
+    // Set the parent to the current process so wait/wait_process can observe children
+    p->parent = myproc();
+    // Give the kernel thread a name of form "proc<pid>" (e.g. proc1)
+    {
+        char buf[16];
+        int idx = 0;
+        buf[idx++] = 'p';
+        buf[idx++] = 'r';
+        buf[idx++] = 'o';
+        buf[idx++] = 'c';
+        int x = p->pid;
+        char tmp[12];
+        int ti = 0;
+        if (x == 0)
+            tmp[ti++] = '0';
+        while (x > 0 && ti < (int)sizeof(tmp))
+        {
+            tmp[ti++] = '0' + (x % 10);
+            x /= 10;
+        }
+        for (int j = ti - 1; j >= 0; j--)
+        {
+            if (idx < (int)sizeof(buf) - 1)
+                buf[idx++] = tmp[j];
+        }
+        buf[idx] = '\0';
+        strncpy(p->name, buf, sizeof(p->name));
+        p->name[sizeof(p->name) - 1] = '\0';
+    }
 
     // Set the context so that when scheduled it starts at kernel_thread_trampoline
     p->context.ra = (uint64)kernel_thread_trampoline;

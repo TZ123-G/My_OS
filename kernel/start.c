@@ -13,6 +13,8 @@ extern char _bss_start[], _bss_end[];
 
 void main();
 
+// synchronization test
+extern test_synchronization(void);
 // stack0 的值（地址）由链接器自动确定，其定义为数组的根本原因只是为了
 // 在 .bss 段中分配一份足够大的空间作为栈空间而已
 __attribute__((aligned(16))) char stack0[4096];
@@ -365,9 +367,6 @@ void cpu_intensive_task(void)
     for (volatile uint64 i = 0; i < 10000000ULL; i++)
     {
         sum += i;
-        // Cooperative yield to avoid depending on M-mode tick hack for preemption.
-        // This lets the scheduler switch between processes even if S-mode timer
-        // interrupts are not fully configured in the environment.
         if ((i & 0xFFFF) == 0)
             yield();
     }
@@ -383,7 +382,7 @@ void scheduler_watcher(void)
     uint64 start = get_time();
     // 等待约 0.2s 到 0.5s（依赖仿真速度），以 cycles 为单位
     // 延长等待时间以便多个协作任务有机会运行并输出日志
-    uint64 deadline = start + 600000000;
+    uint64 deadline = start + 600000;
     while (get_time() < deadline)
     {
         // 轻量忙等待，让出时间片给其他可运行进程
@@ -427,6 +426,24 @@ void test_scheduler(void)
     printf("test_scheduler: scheduler returned (unexpected)\n");
 }
 
+void debug_proc_table(void)
+{
+    pmem_init();
+    procinit();
+    trap_init();
+    enable_interrupts();
+
+    for (int i = 0; i < 3; i++)
+    {
+        int pid = create_process(cpu_intensive_task);
+        if (pid <= 0)
+            printf("test_scheduler: create_process failed for task %d\n", i);
+    }
+
+    // 打印当前进程表快照
+    debug_proc();
+}
+
 void start()
 {
     // 清零 .bss 段
@@ -435,8 +452,8 @@ void start()
         *p = 0;
     }
 
-    // 仅调用异常测试函数；start 仅负责调用这个测试函数
-    test_interrupt_overhead();
+    // 调用同步测试函数；start 仅负责调用这个测试函数
+    debug_proc_table();
 
     main();
 }
