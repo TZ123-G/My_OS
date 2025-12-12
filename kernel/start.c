@@ -258,54 +258,54 @@ void test_interrupt_overhead(void)
     // 确保 ticks 初始值
     extern uint64 ticks;
     ticks = 0;
-
-    // 基线测量：不启用中断时的空循环耗时
-    const int iter = 5000000;
-    uint64 t0 = get_time();
-    for (volatile int i = 0; i < iter; i++)
-        asm volatile("" ::: "memory");
-    uint64 t1 = get_time();
-    uint64 baseline = t1 - t0;
-    printf("Baseline: %d iterations took %d cycles\n", iter, (int)baseline);
-
     // 给定时器一点时间确保 mtimecmp 已写入并生效
     for (volatile int w = 0; w < 1000000; w++)
         ;
 
-    // 启用中断，先等待看到至少一个 ticks（有超时），再开始测量，避免测量窗口内无中断
+    // 主动触发若干次定时器中断来测量中断开销：直接写入 mtimecmp 请求即时中断
     enable_interrupts();
     extern uint64 ticks;
-    uint64 before_wait = ticks;
-    uint64 wait_deadline = get_time() + 200000000; // 等待上限（cycles），约 0.2s-0.5s 量级依赖于仿真速度
-    while (ticks == before_wait && get_time() < wait_deadline)
-        ;
-    if (ticks == before_wait)
+
+    // 小偏移，用于安排近乎立即的中断（cycles）
+    const uint64 trigger_delta = 10;
+    const int needed = 3; // 触发的中断数量
+    uint64 prev = ticks;
+
+    printf("%d timer interrupts (delta=%d cycles) to measure overhead...\n", needed, (int)trigger_delta);
+    uint64 start_forced = get_time();
+    int received = 0;
+    for (int i = 0; i < needed; i++)
     {
-        printf("test_interrupt_overhead: no timer tick observed before measurement (continuing)\n");
+        // 写入 mtimecmp （使用 riscv.h 中的 MTIMECMP 地址宏）
+        uint64 mcmp = MTIMECMP;
+        *(volatile uint64 *)mcmp = r_time() + trigger_delta;
+
+        // 等待 ticks 增加（有超时保护）
+        uint64 wait_deadline = get_time() + 200000000;
+        while (ticks == prev && get_time() < wait_deadline)
+            asm volatile("wfi");
+
+        if (ticks != prev)
+        {
+            prev = ticks;
+            received++;
+            printf("Received tick %d (ticks=%d)\n", received, (int)prev);
+        }
+        else
+        {
+            printf("Timeout waiting for tick %d\n", i + 1);
+        }
+    }
+    uint64 end_forced = get_time();
+
+    if (received > 0)
+    {
+        uint64 total_cycles = end_forced - start_forced;
+        printf("%d interrupts in %d cycles, avg %d cycles/interrupt\n", received, (int)total_cycles, (int)(total_cycles / received));
     }
     else
     {
-        printf("test_interrupt_overhead: observed tick before measurement (ticks=%d)\n", (int)ticks);
-    }
-
-    uint64 start_ticks = ticks;
-    uint64 t2 = get_time();
-    for (volatile int i = 0; i < iter; i++)
-        asm volatile("" ::: "memory");
-    uint64 t3 = get_time();
-    uint64 end_ticks = ticks;
-    uint64 elapsed = t3 - t2;
-    uint64 irq_count = (end_ticks >= start_ticks) ? (end_ticks - start_ticks) : 0;
-
-    printf("With interrupts enabled: %d cycles, interrupts=%d\n", (int)elapsed, (int)irq_count);
-    if (irq_count > 0)
-    {
-        int avg_overhead = (int)((elapsed > baseline) ? ((elapsed - baseline) / irq_count) : 0);
-        printf("Estimated average overhead per interrupt: %d cycles\n", avg_overhead);
-    }
-    else
-    {
-        printf("No interrupts observed during workload. Try increasing runtime or reducing interval.\n");
+        printf("No interrupts observed. Check timer configuration and CLINT mapping.\n");
     }
 
     // 清理：禁用中断
@@ -438,7 +438,7 @@ void start()
     }
 
     // 仅调用异常测试函数；start 仅负责调用这个测试函数
-    test_process_creation();
+    test_interrupt_overhead();
 
     main();
 }
