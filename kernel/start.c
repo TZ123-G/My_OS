@@ -326,8 +326,6 @@ void simple_task(void)
 void test_process_creation(void)
 {
     printf("Testing process creation...\n");
-    // 初始化物理内存分配器和进程子系统，
-    // 以确保 allocproc()/alloc_page() 在测试中可用。
     pmem_init();
     procinit();
     // 测试基本的进程创建
