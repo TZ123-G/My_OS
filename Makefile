@@ -21,6 +21,7 @@ KERNEL_SRCS = \
 		kernel/printf.c \
 		kernel/console.c \
 		kernel/kalloc.c \
+		kernel/syscall.c \
 		kernel/vm.c \
 		kernel/string.c \
 		kernel/spinlock.c \

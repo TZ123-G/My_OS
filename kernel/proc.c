@@ -108,6 +108,9 @@ found:
     static int nextpid = 1;
     p->pid = nextpid++;
 
+    // 标记为已使用，防止被后续 allocproc 重复选中
+    p->state = USED;
+
     // 分配内核栈
     if ((p->kstack = (uint64)alloc_page()) == 0)
     {
@@ -137,6 +140,14 @@ int fork(void)
     // 分配新进程
     if ((np = allocproc()) == 0)
     {
+        return -1;
+    }
+
+    // 为子进程创建用户页表（allocproc 不会分配 pagetable）
+    if ((np->pagetable = create_pagetable()) == 0)
+    {
+        freeproc(np);
+        release(&np->lock);
         return -1;
     }
 

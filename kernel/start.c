@@ -6,6 +6,7 @@
 #include "riscv.h"
 #include "printf.h"
 #include "defs.h"
+#include "syscall.h"
 #include "spinlock.h"
 #include "proc.h"
 
@@ -444,6 +445,117 @@ void debug_proc_table(void)
     debug_proc();
 }
 
+// 简单的系统调用模拟测试：使用栈上伪造的 proc/trapframe 避免依赖 allocproc
+void test_syscall(void)
+{
+    printf("Testing system calls...\n");
+    uartinit();
+    consoleinit();
+    // 初始化物理内存、页表和进程表（但不启动中断/定时器以降低失败概率）
+    pmem_init();
+    kvminit();
+    procinit();
+    struct trapframe tf;
+    struct proc fakep;
+
+    memset(&tf, 0, sizeof(tf));
+    memset(&fakep, 0, sizeof(fakep));
+    fakep.trapframe = &tf;
+    // 使用内核页表作为简化的用户页表，这样 copyin/walkaddr 不会 deref NULL
+    extern pagetable_t kernel_pagetable;
+    fakep.pagetable = kernel_pagetable;
+    fakep.pid = 1;
+    strncpy(fakep.name, "fakes", sizeof(fakep.name));
+
+    struct proc *old = myproc();
+    setproc(&fakep);
+
+    static char msg[] = "[syscall test] Hello from user-space\n";
+    tf.a7 = SYS_write;
+    tf.a0 = 1;
+    tf.a1 = (uint64)msg;
+    tf.a2 = (int)strlen(msg);
+    syscall();
+    printf("test_syscall: write returned %d\n", (int)tf.a0);
+
+    tf.a7 = SYS_getpid;
+    syscall();
+    printf("test_syscall: getpid returned %d\n", (int)tf.a0);
+
+    setproc(old);
+}
+
+// 在内核中通过 syscall() 测试 fork/wait
+void test_syscall_fork(void)
+{
+    printf("Testing fork/wait syscalls...\n");
+    uartinit();
+    consoleinit();
+    pmem_init();
+    kvminit();
+    procinit();
+
+    struct proc *p = allocproc();
+    if (!p) {
+        printf("test_syscall_fork: allocproc failed\n");
+        return;
+    }
+    // 为父进程创建页表并设置基本字段
+    p->pagetable = create_pagetable();
+    p->sz = PGSIZE; // minimal size
+    p->trapframe->epc = 0; // not used
+    strncpy(p->name, "parent", sizeof(p->name));
+
+    // 设置为当前进程
+    // allocproc() 返回时 p->lock 是持有状态；在继续之前释放它，
+    // 否则后续的 allocproc()（由 fork() 调用）在遍历 proc 表时会遇到已持有的锁并触发 panic
+    release(&p->lock);
+    struct proc *old = myproc();
+    setproc(p);
+
+    // 发起 fork 系统调用
+    p->trapframe->a7 = SYS_fork;
+    syscall();
+    int childpid = (int)p->trapframe->a0;
+    printf("test_syscall_fork: fork returned %d\n", childpid);
+
+    if (childpid <= 0) {
+        printf("test_syscall_fork: fork failed\n");
+        setproc(old);
+        return;
+    }
+
+    // 在 proc 表中找到子进程，并将其标记为 ZOMBIE（模拟子进程已退出）
+    extern struct proc proc[];
+    extern struct spinlock wait_lock;
+    struct proc *pp = 0;
+    for (int i = 0; i < NPROC; i++) {
+        if (proc[i].pid == childpid) { pp = &proc[i]; break; }
+    }
+    if (!pp) {
+        printf("test_syscall_fork: child not found\n");
+        setproc(old);
+        return;
+    }
+    acquire(&pp->lock);
+    pp->xstate = 42;
+    pp->state = ZOMBIE;
+    release(&pp->lock);
+
+    // 唤醒父进程（wait 中会检查）
+    acquire(&wait_lock);
+    wakeup(p);
+    release(&wait_lock);
+
+    // 父进程调用 wait 系统调用（传入 addr = 0 表示不拷贝出状态）
+    p->trapframe->a7 = SYS_wait;
+    p->trapframe->a0 = 0; // addr = NULL
+    syscall();
+    int waited = (int)p->trapframe->a0;
+    printf("test_syscall_fork: wait returned %d\n", waited);
+
+    setproc(old);
+}
 void start()
 {
     // 清零 .bss 段
@@ -451,8 +563,7 @@ void start()
     {
         *p = 0;
     }
-
-    // 调用同步测试函数；start 仅负责调用这个测试函数
+    // 运行 syscall 模拟测试
     debug_proc_table();
 
     main();
