@@ -9,3 +9,6 @@
 #define SYS_wait 5
 
 #endif
+
+// Provide syscall() prototype for in-kernel tests that call it directly
+void syscall(void);

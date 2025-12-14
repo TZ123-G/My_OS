@@ -138,4 +138,7 @@ void yield(void);
 void sleep(void *, struct spinlock *);
 void wakeup(void *);
 
+// Debug helper: print process table
+void debug_proc(void);
+
 #endif

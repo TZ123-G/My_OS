@@ -92,4 +92,14 @@ int create_process(void (*entry)(void));
 void exit_process(int status);
 int wait_process(int *status);
 
+// filesystem and buffer cache
+void binit(void);
+struct buf *bread(uint dev, uint blockno);
+void bwrite(struct buf *b);
+void brelse(struct buf *b);
+void fs_init(void);
+void iinit(void);
+void fileinit(void);
+void log_init(void);
+
 #endif

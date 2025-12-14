@@ -152,7 +152,8 @@ void printf_color(int fg, int bg, char *fmt, ...)
 // 简化版 panic 函数
 void panic(char *s)
 {
-    printf("panic: ");
+    // Print pointer address for debugging corrupted pointer cases
+    printf("panic: %p ", (uint64)s);
     printf(s);
     printf("\n");
     while (1)

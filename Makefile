@@ -29,7 +29,11 @@ KERNEL_SRCS = \
 		kernel/proc.c \
 		kernel/process_api.c \
 		kernel/sync_test.c \
-        kernel/main.c
+        kernel/main.c \
+        kernel/bio.c \
+        kernel/fs.c \
+        kernel/file.c \
+        kernel/log.c
 
 # 目标文件
 OBJS = $(patsubst %.S,%.o,$(patsubst %.c,%.o,$(KERNEL_SRCS)))
