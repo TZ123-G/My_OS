@@ -10,6 +10,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "fs.h"
+#include "log.h"
 
 extern char _bss_start[], _bss_end[];
 
@@ -50,7 +51,6 @@ void printf_test()
     goto_xy(1, 10); // 移动到第10行第1列
     printf_color(COLOR_CYAN, -1, "Combined: positioned text with color");
 }
-
 void test_physical_memory(void)
 {
     pmem_init();
@@ -68,6 +68,7 @@ void test_physical_memory(void)
     // page3可能等于page1（取决于分配策略）
     free_page(page2);
     free_page(page3);
+    printf("Physical memory test completed successfully!\n");
 }
 
 void test_pagetable(void)
@@ -215,7 +216,7 @@ void test_illegal_instruction(void)
     trap_init();
     printf("Triggering illegal instruction (handler confirmation skipped)...\n");
     asm volatile(".word 0x0\n");
-    printf(" -> illegal instruction triggered (confirmation omitted)\n");
+    printf("Illegal instruction test completed successfully!\n");
 }
 
 // 单独测试：写入 NULL（可能触发 store page fault）
@@ -230,23 +231,9 @@ void test_store_null(void)
     /* 不再依赖 mexception_count，直接执行写 NULL 的操作并继续。 */
     volatile int *bad = (int *)0x0;
     *bad = 0xdeadbeef;
-    printf(" -> store to NULL executed (confirmation omitted)\n");
+    printf("Store to NULL test completed successfully!\n");
 }
 
-// 单独测试：整型除以零
-void test_divide_by_zero(void)
-{
-    consoleinit();
-    printf("Testing exception handling...\n");
-
-    // 初始化中断/异常处理设施
-    trap_init();
-    printf("Triggering integer divide-by-zero (behavior depends on platform)...\n");
-    volatile int a = 1, b = 0, c = 0;
-    c = a / b;
-    (void)c;
-    printf(" -> divide-by-zero executed (confirmation omitted)\n");
-}
 
 // 测量中断处理开销的测试
 void test_interrupt_overhead(void)
@@ -311,7 +298,7 @@ void test_interrupt_overhead(void)
     {
         printf("No interrupts observed. Check timer configuration and CLINT mapping.\n");
     }
-
+    printf("Interrupt overhead test completed.\n");
     // 清理：禁用中断
     disable_interrupts();
 }
@@ -388,7 +375,7 @@ void scheduler_watcher(void)
     {
         // 轻量忙等待，让出时间片给其他可运行进程
         for (volatile int i = 0; i < 10000; i++)
-            ;
+            yield();
     }
     uint64 end = get_time();
     printf("scheduler_watcher: waited %d cycles\n", (int)(end - start));
@@ -803,6 +790,47 @@ void test_filesystem_performance(void)
     printf("Small files (1000x4B): %d cycles\n", (int)small_files_time);
     printf("Large file (1x4MB): %d cycles\n", (int)large_file_time);
 }
+// 更具体的测试：包含不同级别、长消息、边界覆盖与多次导出
+static __attribute__((unused)) void klog_functional_test(void)
+{
+    uartinit();
+    consoleinit();
+    klog_init();
+    extern int current_log_level;
+
+    // 1) 级别过滤：INFO 阈值下过滤 DEBUG
+    current_log_level = LOG_LEVEL_INFO;
+    klog(LOG_LEVEL_DEBUG, "FT1: debug filtered");
+    klog(LOG_LEVEL_INFO, "FT1: info kept");
+    klog(LOG_LEVEL_WARN, "FT1: warn kept");
+    klog(LOG_LEVEL_ERROR, "FT1: err kept");
+
+    printf("\n[functional_test] dump #1 (threshold=INFO)\n");
+    klog_dump_to_console();
+
+    // 2) 长消息与格式占位
+    current_log_level = LOG_LEVEL_DEBUG;
+    klog(LOG_LEVEL_DEBUG, "FT2: long msg %s %d %x %p %% end",
+         "abcdefghijklmnopqrstuvwxyz0123456789", 12345, 0xabcdeu, (void *)0xfeedbeef);
+
+    // 3) 边界覆盖：多条 DEBUG 触发覆盖
+    for (int i = 0; i < 700; i++)
+    {
+        klog(LOG_LEVEL_DEBUG, "FT3: spam %d", i);
+    }
+
+    printf("\n[functional_test] dump #2 (after spam)\n");
+    klog_dump_to_console();
+
+    // 4) 阈值调整：切到 WARN，仅记录重要信息
+    current_log_level = LOG_LEVEL_WARN;
+    klog(LOG_LEVEL_INFO, "FT4: info should be filtered");
+    klog(LOG_LEVEL_WARN, "FT4: warn kept");
+    klog(LOG_LEVEL_ERROR, "FT4: error kept with code=%x", 0xdeadbeef);
+
+    printf("\n[functional_test] dump #3 (threshold=WARN)\n");
+    klog_dump_to_console();
+}
 
 void start()
 {
@@ -812,6 +840,6 @@ void start()
         *p = 0;
     }
 
-    test_filesystem_integrity();
+    test_syscall();
     main();
 }

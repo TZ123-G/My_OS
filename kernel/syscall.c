@@ -4,6 +4,7 @@
 #include "defs.h"
 #include "printf.h"
 #include "syscall.h"
+#include "log.h"
 
 // helper: copy data from user virtual address into kernel buffer
 static int
@@ -26,6 +27,30 @@ copyin_user(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
         len -= n;
         dst += n;
         srcva = va0 + PGSIZE;
+    }
+    return 0;
+}
+
+// helper: copy data from kernel buffer into user virtual address
+static int
+copyout_user(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
+{
+    uint64 n, va0, pa0;
+    while (len > 0)
+    {
+        va0 = PGROUNDDOWN(dstva);
+        if (va0 >= MAXVA)
+            return -1;
+        pa0 = walkaddr(pagetable, va0);
+        if (pa0 == 0)
+            return -1;
+        n = PGSIZE - (dstva - va0);
+        if (n > len)
+            n = len;
+        memmove((void *)(pa0 + (dstva - va0)), src, n);
+        len -= n;
+        src += n;
+        dstva = va0 + PGSIZE;
     }
     return 0;
 }
@@ -167,6 +192,26 @@ sys_wait(void)
     return wait(addr);
 }
 
+static uint64
+sys_klog(void)
+{
+    uint64 ubuf;
+    int n;
+    argaddr(0, &ubuf);
+    argint(1, &n);
+    if (n <= 0)
+        return 0;
+    if (n > 1024)
+        n = 1024;
+    char tmp[1024];
+    int r = klog_read(tmp, n);
+    if (r <= 0)
+        return r;
+    if (copyout_user(myproc()->pagetable, ubuf, tmp, r) < 0)
+        return -1;
+    return r;
+}
+
 // syscall table
 static uint64 (*syscalls[])(void) = {
     [SYS_write] sys_write,
@@ -174,6 +219,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_exit] sys_exit,
     [SYS_fork] sys_fork,
     [SYS_wait] sys_wait,
+    [SYS_klog] sys_klog,
 };
 
 #define NELEM(x) (sizeof(x) / sizeof((x)[0]))
