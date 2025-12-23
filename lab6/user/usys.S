@@ -28,3 +28,21 @@ wait:
     li a7, SYS_wait
     ecall
     ret
+
+.global read
+read:
+    li a7, SYS_read
+    ecall
+    ret
+
+.global open
+open:
+    li a7, SYS_open
+    ecall
+    ret
+
+.global close
+close:
+    li a7, SYS_close
+    ecall
+    ret

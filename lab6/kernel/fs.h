@@ -77,6 +77,10 @@ struct buf *bread(uint dev, uint blockno);
 void bwrite(struct buf *b);
 void brelse(struct buf *b);
 
+// namei/create for simple pathname handling
+struct inode *namei(const char *path);
+struct inode *create(const char *path, short type);
+
 // debug helpers
 void read_superblock(struct superblock *out);
 int count_free_blocks(void);

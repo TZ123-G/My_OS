@@ -9,6 +9,7 @@
 #include "syscall.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "fs.h"
 
 extern char _bss_start[], _bss_end[];
 
@@ -231,7 +232,6 @@ void test_store_null(void)
     *bad = 0xdeadbeef;
     printf("Store to NULL test completed successfully!\n");
 }
-
 
 // 测量中断处理开销的测试
 void test_interrupt_overhead(void)
@@ -470,6 +470,151 @@ void test_syscall(void)
     setproc(old);
 }
 
+// 适配内核的参数传递测试：通过伪造 proc/trapframe 调用 syscall()
+void test_parameter_passing(void)
+{
+    printf("Running test_parameter_passing...\n");
+    uartinit();
+    consoleinit();
+    pmem_init();
+    kvminit();
+    procinit();
+
+    struct trapframe tf;
+    struct proc fakep;
+    memset(&tf, 0, sizeof(tf));
+    memset(&fakep, 0, sizeof(fakep));
+    fakep.trapframe = &tf;
+    extern pagetable_t kernel_pagetable;
+    fakep.pagetable = kernel_pagetable;
+    fakep.pid = 2;
+    strncpy(fakep.name, "ptest", sizeof(fakep.name));
+
+    struct proc *old = myproc();
+    setproc(&fakep);
+
+    static char buffer[] = "Hello, World!\n";
+    static char path[] = "/dev/console";
+
+    // open
+    tf.a7 = SYS_open;
+    tf.a0 = (uint64)path;
+    tf.a1 = 0; // flags (ignored in our simple sys_open)
+    syscall();
+    int fd = (int)tf.a0;
+    printf("open returned %d\n", fd);
+
+    if (fd >= 0)
+    {
+        // write
+        tf.a7 = SYS_write;
+        tf.a0 = fd;
+        tf.a1 = (uint64)buffer;
+        tf.a2 = (int)strlen(buffer);
+        syscall();
+        printf("write returned %d\n", (int)tf.a0);
+
+        // close
+        tf.a7 = SYS_close;
+        tf.a0 = fd;
+        syscall();
+        printf("close returned %d\n", (int)tf.a0);
+    }
+
+    // boundary cases
+    // invalid fd
+    tf.a7 = SYS_write;
+    tf.a0 = -1;
+    tf.a1 = (uint64)buffer;
+    tf.a2 = 10;
+    syscall();
+    printf("write(-1, buffer, 10) = %d\n", (int)tf.a0);
+
+    // NULL pointer
+    tf.a7 = SYS_write;
+    tf.a0 = fd >= 0 ? fd : 1;
+    tf.a1 = 0;
+    tf.a2 = 10;
+    syscall();
+    printf("write(fd, NULL, 10) = %d\n", (int)tf.a0);
+
+    // negative length
+    tf.a7 = SYS_write;
+    tf.a0 = fd >= 0 ? fd : 1;
+    tf.a1 = (uint64)buffer;
+    tf.a2 = -1;
+    syscall();
+    printf("write(fd, buffer, -1) = %d\n", (int)tf.a0);
+
+    setproc(old);
+}
+
+// 适配内核的安全性测试：无效用户指针、缓冲区边界与权限检查
+void test_security(void)
+{
+    printf("Running test_security...\n");
+    uartinit();
+    consoleinit();
+    pmem_init();
+    kvminit();
+    procinit();
+
+    struct trapframe tf;
+    struct proc fakep;
+    memset(&tf, 0, sizeof(tf));
+    memset(&fakep, 0, sizeof(fakep));
+    fakep.trapframe = &tf;
+    extern pagetable_t kernel_pagetable;
+    fakep.pagetable = kernel_pagetable;
+    fakep.pid = 3;
+    strncpy(fakep.name, "scktest", sizeof(fakep.name));
+
+    struct proc *old = myproc();
+    setproc(&fakep);
+
+    // invalid pointer write
+    char *invalid_ptr = (char *)0x1000000;
+    tf.a7 = SYS_write;
+    tf.a0 = 1;
+    tf.a1 = (uint64)invalid_ptr;
+    tf.a2 = 10;
+    syscall();
+    printf("Invalid pointer write result: %d\n", (int)tf.a0);
+
+    // read into too-small buffer
+    char small_buf[4];
+    tf.a7 = SYS_read;
+    tf.a0 = 0;
+    tf.a1 = (uint64)small_buf;
+    tf.a2 = 1000;
+    syscall();
+    printf("read(0, small_buf, 1000) = %d\n", (int)tf.a0);
+
+    // permission check: open as read-only then try write
+    static char cons[] = "/dev/console";
+    tf.a7 = SYS_open;
+    tf.a0 = (uint64)cons;
+    tf.a1 = 0; // O_RDONLY (not enforced by our sys_open)
+    syscall();
+    int rfd = (int)tf.a0;
+    printf("open(/dev/console,O_RDONLY) = %d\n", rfd);
+    if (rfd >= 0)
+    {
+        tf.a7 = SYS_write;
+        tf.a0 = rfd;
+        tf.a1 = (uint64) "X";
+        tf.a2 = 1;
+        syscall();
+        printf("write(readonly_fd, \"X\",1) = %d\n", (int)tf.a0);
+
+        tf.a7 = SYS_close;
+        tf.a0 = rfd;
+        syscall();
+    }
+
+    setproc(old);
+}
+
 // 在内核中通过 syscall() 测试 fork/wait
 void test_syscall_fork(void)
 {
@@ -549,6 +694,314 @@ void test_syscall_fork(void)
 
     setproc(old);
 }
+
+void test_filesystem_integrity(void)
+{
+    consoleinit();
+    printf("Testing filesystem integrity...\n");
+
+    fs_init();
+    fileinit();
+
+    // 直接使用内核 inode 接口创建并测试读写
+    struct inode *ip = ialloc(0, 1); // type=1 (file/dir)
+    assert(ip != 0);
+
+    char wbuf[] = "Hello, filesystem!";
+    int wlen = strlen(wbuf);
+    int written = writei(ip, wbuf, 0, wlen);
+    if (written != wlen)
+    {
+        printf("write failed: wrote %d expected %d\n", written, wlen);
+        panic("filesystem test write failed");
+    }
+
+    char rbuf[64];
+    int read = readi(ip, rbuf, 0, sizeof(rbuf) - 1);
+    if (read < 0)
+    {
+        printf("read failed\n");
+        panic("filesystem test read failed");
+    }
+    rbuf[read] = '\0';
+
+    if (strcmp(wbuf, rbuf) != 0)
+    {
+        printf("mismatch: wrote '%s' read '%s'\n", wbuf, rbuf);
+        panic("filesystem contents mismatch");
+    }
+
+    // 模拟删除：清除 inode 标记并释放引用
+    ip->valid = 0;
+    iput(ip);
+
+    printf("Filesystem integrity test passed\n");
+}
+
+void concurrent_worker(void)
+{
+    // each worker will allocate/write/read/free inodes repeatedly
+    struct proc *p = myproc();
+    int pid = p ? p->pid : 0;
+    printf("worker %d: started\n", pid);
+    for (int j = 0; j < 100; j++)
+    {
+        struct inode *ip = ialloc(0, 1);
+        if (!ip)
+        {
+            // allocation failed, back off and continue
+            for (volatile int w = 0; w < 1000; w++)
+                ;
+            continue;
+        }
+        // write an int
+        int val = j;
+        int wrote = writei(ip, (char *)&val, 0, sizeof(val));
+        if (wrote != sizeof(val))
+        {
+            printf("worker %d: write error at iter %d wrote=%d\n", pid, j, wrote);
+        }
+        // read it back
+        int r = 0;
+        int rd = readi(ip, (char *)&r, 0, sizeof(r));
+        if (rd == sizeof(r) && r != val)
+        {
+            printf("worker %d: mismatch iter %d %d!=%d\n", pid, j, r, val);
+        }
+        // simulate unlink
+        ip->valid = 0;
+        iput(ip);
+    }
+    printf("worker %d: done\n", pid);
+    exit_process(0);
+}
+
+void test_concurrent_access(void)
+{
+    consoleinit();
+    printf("Testing concurrent file access...\n");
+
+    pmem_init();
+    procinit();
+    // trap_init();
+    // enable_interrupts();
+
+    const int nworkers = 4;
+    for (int i = 0; i < nworkers; i++)
+    {
+        int pid = create_process(concurrent_worker);
+        if (pid <= 0)
+            printf("test_concurrent_access: create_process failed for worker %d\n", i);
+    }
+
+    // enter scheduler to run workers; this does not return
+    scheduler();
+
+    // unreachable
+}
+
+// 文件系统调试信息打印：按用户需求实现
+void debug_filesystem_state(void)
+{
+    printf("=== Filesystem Debug Info ===\n");
+    // 初始化必要子系统以确保 API 可用
+    fs_init();
+    fileinit();
+
+    // 超级块信息
+    struct superblock sb;
+    read_superblock(&sb);
+    printf("Total blocks: %d\n", (int)sb.size);
+
+    // 统计空闲块与空闲 inode
+    printf("Free blocks: %d\n", count_free_blocks());
+    printf("Free inodes: %d\n", count_free_inodes());
+
+    // 缓存命中统计（读取器会在使用 bread 时变化）
+    printf("Buffer cache hits: %d\n", buffer_cache_hits());
+    printf("Buffer cache misses: %d\n", buffer_cache_misses());
+}
+// 新的测试函数：磁盘 I/O 统计打印
+void debug_disk_io(void)
+{
+    printf("=== Disk I/O Statistics ===\n");
+    // 可选：确保子系统初始化
+    fs_init();
+    fileinit();
+    printf("Disk reads: %d\n", disk_read_count());
+    printf("Disk writes: %d\n", disk_write_count());
+}
+
+void new_debug_disk_io(void)
+{
+    printf("=== Disk I/O Statistics ===\n");
+    // 可选：确保子系统初始化
+    fs_init();
+    fileinit();
+    // 触发一次读（选择一个未加载过的块）
+    struct superblock sb;
+    read_superblock(&sb);
+    uint sample = sb.bmapstart + 1;
+    struct buf *b = bread(0, sample);
+    brelse(b);
+    // 触发一次写（分配 inode 并写入一个整数）
+    struct inode *ip = ialloc(0, 1);
+    if (ip)
+    {
+        int val = 42;
+        writei(ip, (char *)&val, 0, sizeof(val));
+        // 不立即 iput，以便观察 ref>0 的情况；这里简洁起见不打印 inode 信息
+    }
+    printf("Disk reads: %d\n", disk_read_count());
+    printf("Disk writes: %d\n", disk_write_count());
+}
+
+// 新的测试函数：改写 inode 使用情况打印
+void fs_inode_usage(void)
+{
+    printf("=== Inode Usage ===\n");
+    // 确保文件系统初始化
+    fs_init();
+    fileinit();
+    int n = fs_inode_count();
+    for (int i = 0; i < n; i++)
+    {
+        struct inode *ip = fs_inode_at(i);
+        if (!ip)
+            continue;
+        if (ip->ref > 0)
+        {
+            printf("Inode %d: ref=%d, type=%d, size=%d\n",
+                   (int)ip->inum, (int)ip->ref, (int)ip->type, (int)ip->size);
+        }
+    }
+}
+
+// 适配内核的文件系统性能测试：使用 inode 层 API，无文件名
+void test_filesystem_performance(void)
+{
+    consoleinit();
+    printf("Testing filesystem performance...\n");
+
+    // 初始化文件系统与文件层
+    fs_init();
+    fileinit();
+
+    // 大量小“文件”（inode）测试：每次分配一个 inode，写入 4 字节，再释放
+    uint64 start_time = get_time();
+    const int small_n = 1000;
+    const char small_data[4] = {'t', 'e', 's', 't'};
+    for (int i = 0; i < small_n; i++)
+    {
+        struct inode *ip = ialloc(0, 1); // type=1：文件
+        if (!ip)
+        {
+            // 分配失败则跳过，避免测试中断
+            continue;
+        }
+        // 写入 4 字节
+        int wrote = writei(ip, (char *)small_data, 0, sizeof(small_data));
+        (void)wrote; // 测试场景不强制校验返回值
+        // 释放并模拟“unlink”
+        ip->valid = 0;
+        iput(ip);
+    }
+    uint64 small_files_time = get_time() - start_time;
+
+    // 大文件测试：同一个 inode 连续写入 4KB * 1024 = 4MB
+    start_time = get_time();
+    struct inode *large = ialloc(0, 1);
+    if (large)
+    {
+        char *large_buffer = (char *)alloc_page();
+        if (large_buffer)
+        {
+            // 缓冲区内容无需特定值，保持未初始化即可
+            for (int i = 0; i < 1024; i++)
+            {
+                // 每次写 4KB，偏移递增
+                writei(large, large_buffer, i * BSIZE, BSIZE);
+            }
+            free_page(large_buffer);
+        }
+        // 释放并模拟“unlink”
+        large->valid = 0;
+        iput(large);
+    }
+    uint64 large_file_time = get_time() - start_time;
+
+    printf("Small files (1000x4B): %d cycles\n", (int)small_files_time);
+    printf("Large file (1x4MB): %d cycles\n", (int)large_file_time);
+}
+
+// Crash recovery test: 可直接在 start() 中调用
+#define T_FILE 1
+
+void test_crash_recovery(void)
+{
+    consoleinit();
+    printf("=== Crash recovery test (kernel) ===\n");
+
+    fs_init();
+    fileinit();
+
+    const int NUM = 100; // 可按需调整
+    char name[64];
+    const char *payload = "crash-test-data\n";
+    int errors = 0;
+
+    // 如果第一个文件已存在，认为是重启后的检查阶段
+    if (namei("/crashf0") != 0)
+    {
+        printf("Post-crash: verifying %d files...\n", NUM);
+        for (int i = 0; i < NUM; i++)
+        {
+            snprintf(name, sizeof(name), "/crashf%d", i);
+            struct inode *ip = namei(name);
+            if (!ip)
+            {
+                printf("MISSING %s\n", name);
+                errors++;
+                continue;
+            }
+            char buf[128];
+            int n = readi(ip, buf, 0, sizeof(buf) - 1);
+            iput(ip);
+            if (n <= 0 || strstr(buf, "crash-test") == 0)
+            {
+                printf("CORRUPT %s (read=%d)\n", name, n);
+                errors++;
+            }
+        }
+        if (errors == 0)
+            printf("RECOVERY OK: all %d files present and readable\n", NUM);
+        else
+            printf("RECOVERY FAIL: %d errors\n", errors);
+        return;
+    }
+
+    // 首次运行：创建大量文件并写入，然后触发 panic 模拟崩溃
+    printf("First run: creating %d files then triggering panic...\n", NUM);
+    for (int i = 0; i < NUM; i++)
+    {
+        snprintf(name, sizeof(name), "/crashf%d", i);
+        struct inode *ip = create(name, T_FILE);
+        if (!ip)
+        {
+            printf("create failed %s\n", name);
+            continue;
+        }
+        writei(ip, (char *)payload, 0, (int)strlen(payload));
+        iput(ip);
+        if ((i & 15) == 0)
+        {
+            printf(".");
+        }
+    }
+    printf("\nFiles created. Triggering panic now to simulate crash.\n");
+    panic("test_crash_recovery: user-triggered crash");
+}
+
 void start()
 {
     // 清零 .bss 段
@@ -556,6 +1009,11 @@ void start()
     {
         *p = 0;
     }
+
+    // Run syscall-related tests before crash recovery to ensure they execute
+    test_parameter_passing();
+    test_security();
+
 
     main();
 }

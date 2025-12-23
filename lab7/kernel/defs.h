@@ -11,10 +11,7 @@ struct context;
 #define COLOR_RED 1
 #define COLOR_GREEN 2
 #define COLOR_YELLOW 3
-// log.c
-void klog_init(void);
-void klog(int level, const char *fmt, ...);
-int klog_dump_to_console(void);
+// (log functions removed for lab7 build)
 
 #define COLOR_BLUE 4
 #define COLOR_MAGENTA 5
@@ -32,6 +29,10 @@ void set_color(int fg, int bg);
 void uartinit(void);
 void uart_putc(char c);
 void uart_puts(char *s);
+
+// small helpers
+int snprintf(char *out, size_t outsz, const char *fmt, ...);
+char *strstr(const char *haystack, const char *needle);
 
 // kalloc.c
 void pmem_init(void);
@@ -105,4 +106,9 @@ void brelse(struct buf *b);
 void fs_init(void);
 void iinit(void);
 void fileinit(void);
+/* log / transaction API */
+void log_init(void);
+void begin_op(void);
+void end_op(void);
+void log_write(struct buf *b);
 #endif

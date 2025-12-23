@@ -56,6 +56,9 @@
 #define SYS_exit   3
 #define SYS_fork   4
 #define SYS_wait   5
+#define SYS_read   6
+#define SYS_open   7
+#define SYS_close  8
 ```
 用户态桩在 [user/usys.S](user/usys.S) 中为每个调用生成统一序列：
 ```asm
@@ -64,6 +67,9 @@ getpid:  li a7, SYS_getpid;  ecall; ret
 exit:    li a7, SYS_exit;    ecall; ret
 fork:    li a7, SYS_fork;    ecall; ret
 wait:    li a7, SYS_wait;    ecall; ret
+read:    li a7, SYS_read;    ecall; ret
+open:    li a7, SYS_open;    ecall; ret
+close:   li a7, SYS_close;   ecall; ret
 ```
 
 ## 3、陷阱与分发（trap.c → syscall.c）
@@ -76,6 +82,9 @@ wait:    li a7, SYS_wait;    ecall; ret
 ```c
 static uint64 (*syscalls[])(void) = {
   [SYS_write]  sys_write,
+  [SYS_read]   sys_read,
+  [SYS_open]   sys_open,
+  [SYS_close]  sys_close,
   [SYS_getpid] sys_getpid,
   [SYS_exit]   sys_exit,
   [SYS_fork]   sys_fork,
@@ -98,6 +107,9 @@ int    argstr(int n, char *buf, int max);
 
 ## 4、内核实现示例（syscall.c）
 - **写输出 `sys_write`**：支持 `fd=1/2`，先 `copyin_user` 将用户缓冲读入内核临时缓冲，再逐字输出到控制台；若 `copyin_user` 失败，允许使用“内核指针”作为测试退路。
+ - **读入 `sys_read`**：本实验的简化实现仅支持标准输入 `fd==0`，对其他 `fd` 返回错误；如果请求长度或地址无效返回 `-1`，当前不提供交互输入时返回 `0`（EOF）。
+ - **打开 `sys_open`**：通过 `argstr` 获取路径名并检查长度，接受 `/dev/console` 或 `console` 并映射到控制台文件描述符（返回 `1`），其它路径返回 `-1`。
+ - **关闭 `sys_close`**：接收 `fd` 参数，允许关闭标准描述符 `0/1/2`（作为无副作用的 no-op 返回 `0`），对非法 `fd` 返回 `-1`。
 - **进程标识 `sys_getpid`**：直接返回当前进程 `pid`。
 - **退出 `sys_exit`**：读取状态码并调用 `exit(status)`，不返回。
 - **创建 `sys_fork`**：委托已有 `fork()` 逻辑。
@@ -116,7 +128,7 @@ int copyinstr_user(pagetable_t, char *buf, uint64 srcva, int max);
 - **进入内核**：`uservec` 保存用户寄存器到 `TRAPFRAME`，切换 `satp` 到内核页表，最终 `jalr usertrap()`。
 - **返回用户**：`userret` 在 `satp` 切回用户页表后恢复寄存器，并 `sret` 依据 `sepc` 返回。`usertrapret()` 在 [kernel/trap.c](kernel/trap.c) 中设置 `sstatus`/`sepc`/`satp` 并跳转到 `userret`。
 
-## 6、测试用例与结果（start.c）
+## 6、测试用例与结果
 可在 QEMU 运行下观察行为：
 ```bash
 make clean
@@ -249,3 +261,155 @@ make run
     ```
   测试结果示意：
   ![lab6测试2.png](results/lab6测试2.png)
+
+- **参数传递测试**
+  ```c
+  void test_parameter_passing(void)
+  {
+      printf("Running test_parameter_passing...\n");
+      uartinit();
+      consoleinit();
+      pmem_init();
+      kvminit();
+      procinit();
+
+      struct trapframe tf;
+      struct proc fakep;
+      memset(&tf, 0, sizeof(tf));
+      memset(&fakep, 0, sizeof(fakep));
+      fakep.trapframe = &tf;
+      extern pagetable_t kernel_pagetable;
+      fakep.pagetable = kernel_pagetable;
+      fakep.pid = 2;
+      strncpy(fakep.name, "ptest", sizeof(fakep.name));
+
+      struct proc *old = myproc();
+      setproc(&fakep);
+
+      static char buffer[] = "Hello, World!\n";
+      static char path[] = "/dev/console";
+
+      // open
+      tf.a7 = SYS_open;
+      tf.a0 = (uint64)path;
+      tf.a1 = 0; // flags (ignored in our simple sys_open)
+      syscall();
+      int fd = (int)tf.a0;
+      printf("open returned %d\n", fd);
+
+      if (fd >= 0)
+      {
+          // write
+          tf.a7 = SYS_write;
+          tf.a0 = fd;
+          tf.a1 = (uint64)buffer;
+          tf.a2 = (int)strlen(buffer);
+          syscall();
+          printf("write returned %d\n", (int)tf.a0);
+
+          // close
+          tf.a7 = SYS_close;
+          tf.a0 = fd;
+          syscall();
+          printf("close returned %d\n", (int)tf.a0);
+      }
+
+      // boundary cases
+      // invalid fd
+      tf.a7 = SYS_write;
+      tf.a0 = -1;
+      tf.a1 = (uint64)buffer;
+      tf.a2 = 10;
+      syscall();
+      printf("write(-1, buffer, 10) = %d\n", (int)tf.a0);
+
+      // NULL pointer
+      tf.a7 = SYS_write;
+      tf.a0 = fd >= 0 ? fd : 1;
+      tf.a1 = 0;
+      tf.a2 = 10;
+      syscall();
+      printf("write(fd, NULL, 10) = %d\n", (int)tf.a0);
+
+      // negative length
+      tf.a7 = SYS_write;
+      tf.a0 = fd >= 0 ? fd : 1;
+      tf.a1 = (uint64)buffer;
+      tf.a2 = -1;
+      syscall();
+      printf("write(fd, buffer, -1) = %d\n", (int)tf.a0);
+
+      setproc(old);
+  }
+  ```
+  测试结果示意：
+  ![lab6测试3.png](results/lab6测试3.png)
+- **安全性测试**
+  ```c
+  void test_security(void)
+  {
+      printf("Running test_security...\n");
+      uartinit();
+      consoleinit();
+      pmem_init();
+      kvminit();
+      procinit();
+
+      struct trapframe tf;
+      struct proc fakep;
+      memset(&tf, 0, sizeof(tf));
+      memset(&fakep, 0, sizeof(fakep));
+      fakep.trapframe = &tf;
+      extern pagetable_t kernel_pagetable;
+      fakep.pagetable = kernel_pagetable;
+      fakep.pid = 3;
+      strncpy(fakep.name, "scktest", sizeof(fakep.name));
+
+      struct proc *old = myproc();
+      setproc(&fakep);
+
+      // invalid pointer write
+      char *invalid_ptr = (char *)0x1000000;
+      tf.a7 = SYS_write;
+      tf.a0 = 1;
+      tf.a1 = (uint64)invalid_ptr;
+      tf.a2 = 10;
+      syscall();
+      printf("Invalid pointer write result: %d\n", (int)tf.a0);
+
+      // read into too-small buffer
+      char small_buf[4];
+      tf.a7 = SYS_read;
+      tf.a0 = 0;
+      tf.a1 = (uint64)small_buf;
+      tf.a2 = 1000;
+      syscall();
+      printf("read(0, small_buf, 1000) = %d\n", (int)tf.a0);
+
+      // permission check: open as read-only then try write
+      static char cons[] = "/dev/console";
+      tf.a7 = SYS_open;
+      tf.a0 = (uint64)cons;
+      tf.a1 = 0; // O_RDONLY (not enforced by our sys_open)
+      syscall();
+      int rfd = (int)tf.a0;
+      printf("open(/dev/console,O_RDONLY) = %d\n", rfd);
+      if (rfd >= 0)
+      {
+          tf.a7 = SYS_write;
+          tf.a0 = rfd;
+          tf.a1 = (uint64) "X";
+          tf.a2 = 1;
+          syscall();
+          printf("write(readonly_fd, \"X\",1) = %d\n", (int)tf.a0);
+
+          tf.a7 = SYS_close;
+          tf.a0 = rfd;
+          syscall();
+      }
+
+      setproc(old);
+  }
+  ```
+  测试结果示意：
+  ![lab6测试4.png](results/lab6测试4.png)

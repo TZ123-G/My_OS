@@ -57,6 +57,15 @@
 - **系统调用与测试**：[kernel/syscall.c](kernel/syscall.c)、[kernel/start.c](kernel/start.c)
   - 维持最小调用集（`write/getpid/exit/fork/wait`），文件系统测试通过内核接口直接进行。
 
+- **写前日志（WAL）/事务模块**：[kernel/log.c](kernel/log.c)
+  - 本次已在 `kernel` 下添加一个简化的 WAL 模块 `log.c`，并把它集成进构建流程（已在 `Makefile` 中添加 `kernel/log.c`）。
+  - 主要接口：`log_init()`、`begin_op()`、`end_op()`、`log_write(struct buf *b)`。
+  - 集成要点：
+    - 在 `fs_init()` 中调用 `log_init()`；超级块 `sb.nlog` 已设置为 30，日志区由 `sb.logstart` 开始。
+    - 在 `fs.c` 中，间接表更新使用 `log_write()` 登记，`writei()` 的数据写入已用 `begin_op()`/`end_op()` 包裹并通过 `log_write()` 登记数据块，从而在 `end_op()` 时按 WAL 顺序提交。
+    - 提交顺序严格保证：先写日志块 -> 写日志头并刷盘 -> 将日志内容写回目标块 -> 清理日志头，以保证崩溃后可重放已提交事务恢复一致性。
+  - 实现说明：当前为简化版本，针对内存模拟磁盘场景做了保守的日志配额与去重登记，适合作为教学与实验用途；后续可扩展为循环日志、事务合并或更精细的配额策略。
+
 ## 2、核心数据结构（fs.h）
 - **常量**：
   - **`BSIZE`**: 块大小，4096；**`NBLOCKS`**: 模拟磁盘总块数，1024。
@@ -114,7 +123,7 @@ struct buf { int valid, disk; uint dev, blockno; int refcnt; struct spinlock loc
 make clean
 make run
 ```
-- **文件系统一致性测试**：验证 `ialloc`/`writei`/`readi` 的基本工作流与内容一致性。
+- **文件系统一致性测试**
   ```c
   void test_filesystem_integrity(void) {
       consoleinit();
@@ -136,7 +145,7 @@ make run
   结果示意：
   ![lab7测试1.png](results/lab7测试1.png)
 
-- **并发测试**通过test_concurrent_access()创建多个工作进程同时运行concurrent_worker，每个进程循环进行inode的分配、写入一个整数、读回校验以及释放（iput），并在分配失败时短暂退避，以此在无文件名路径层的inode接口上压力验证文件系统在并发场景下的基本正确性。
+- **并发测试**
   ```c
   void concurrent_worker(void)
     {
@@ -202,7 +211,7 @@ make run
     ```
     测试结果如下：
     ![lab7测试2.png](results/lab7测试2.png)
-- **文件系统状态检查**：通过 `debug_filesystem_state()` 输出关键运行指标，用于在调试与监控中观察文件系统状态，包括超级块的总块数（Total blocks）、当前空闲块与空闲inode数量（容量与使用情况）、以及缓冲区缓存的命中/未命中统计（buffer cache hits/misses，反映块缓存效率）
+- **文件系统状态检查**
     ```c
     void debug_filesystem_state(void)
     {
@@ -227,7 +236,7 @@ make run
     ```
     测试结果如下：
     ![lab7测试3.png](results/lab7测试3.png)
-- **磁盘I/O统计**：通过 `debug_disk_io()` 输出磁盘I/O统计信息，用于观察磁盘I/O效率。
+- **磁盘I/O统计**：
   ```c
   void debug_disk_io(void)
     {
@@ -241,7 +250,7 @@ make run
   ```
   测试结果如下：
   ![lab7测试4.png](results/lab7测试4.png)
-- **inode 使用情况检查**：通过 `fs_inode_usage()` 输出当前文件系统中“活跃”inode的使用情况快照，用于定位未释放的inode、观察资源占用和对象生命周期，常用于调试文件系统泄漏或并发测试后的状态检查。
+- **inode 使用情况检查**
   ```c
   void fs_inode_usage(void)
     {
@@ -266,3 +275,63 @@ make run
     测试结果如下：
     ![lab7测试5.png](results/lab7测试5.png)
 
+- **大小文件分配**
+  ```c
+  void test_filesystem_performance(void)
+  {
+      consoleinit();
+      printf("Testing filesystem performance...\n");
+
+      // 初始化文件系统与文件层
+      fs_init();
+      fileinit();
+
+      // 大量小“文件”（inode）测试：每次分配一个 inode，写入 4 字节，再释放
+      uint64 start_time = get_time();
+      const int small_n = 1000;
+      const char small_data[4] = {'t', 'e', 's', 't'};
+      for (int i = 0; i < small_n; i++)
+      {
+          struct inode *ip = ialloc(0, 1); // type=1：文件
+          if (!ip)
+          {
+              // 分配失败则跳过，避免测试中断
+              continue;
+          }
+          // 写入 4 字节
+          int wrote = writei(ip, (char *)small_data, 0, sizeof(small_data));
+          (void)wrote; // 测试场景不强制校验返回值
+          // 释放并模拟“unlink”
+          ip->valid = 0;
+          iput(ip);
+      }
+      uint64 small_files_time = get_time() - start_time;
+
+      // 大文件测试：同一个 inode 连续写入 4KB * 1024 = 4MB
+      start_time = get_time();
+      struct inode *large = ialloc(0, 1);
+      if (large)
+      {
+          char *large_buffer = (char *)alloc_page();
+          if (large_buffer)
+          {
+              // 缓冲区内容无需特定值，保持未初始化即可
+              for (int i = 0; i < 1024; i++)
+              {
+                  // 每次写 4KB，偏移递增
+                  writei(large, large_buffer, i * BSIZE, BSIZE);
+              }
+              free_page(large_buffer);
+          }
+          // 释放并模拟“unlink”
+          large->valid = 0;
+          iput(large);
+      }
+      uint64 large_file_time = get_time() - start_time;
+
+      printf("Small files (1000x4B): %d cycles\n", (int)small_files_time);
+      printf("Large file (1x4MB): %d cycles\n", (int)large_file_time);
+  }
+  ```
+  测试结果如下：  
+  ![lab7测试6.png](results/lab7测试6.png)

@@ -31,7 +31,8 @@ KERNEL_SRCS = \
 		kernel/sync_test.c \
         kernel/main.c \
         kernel/bio.c \
-        kernel/fs.c \
+		kernel/fs.c \
+		kernel/log.c \
         kernel/file.c 
 
 # 目标文件

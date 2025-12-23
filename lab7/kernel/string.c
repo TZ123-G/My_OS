@@ -1,4 +1,6 @@
 #include "types.h"
+#include <stdarg.h>
+#include "fs.h" // for DIRSIZ if needed by snprintf
 
 /**
  * 用指定值填充内存区域
@@ -353,4 +355,91 @@ void *memchr(const void *s, int c, size_t n)
     }
 
     return 0;
+}
+
+// 简单的 strstr 实现
+char *strstr(const char *haystack, const char *needle)
+{
+    if (!haystack || !needle)
+        return 0;
+    if (*needle == '\0')
+        return (char *)haystack;
+    for (; *haystack; haystack++)
+    {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h && *n && *h == *n)
+        {
+            h++;
+            n++;
+        }
+        if (*n == '\0')
+            return (char *)haystack;
+    }
+    return 0;
+}
+
+// 极简 snprintf，仅支持 %d 和 %s 和 %%
+int snprintf(char *out, size_t outsz, const char *fmt, ...)
+{
+    if (!out || outsz == 0)
+        return 0;
+    va_list ap;
+    va_start(ap, fmt);
+    size_t n = 0;
+    for (; *fmt && n + 1 < outsz; fmt++)
+    {
+        if (*fmt != '%')
+        {
+            out[n++] = *fmt;
+            continue;
+        }
+        fmt++;
+        if (!*fmt)
+            break;
+        if (*fmt == '%')
+        {
+            out[n++] = '%';
+            continue;
+        }
+        if (*fmt == 's')
+        {
+            const char *s = va_arg(ap, const char *);
+            if (!s)
+                s = "(null)";
+            while (*s && n + 1 < outsz)
+                out[n++] = *s++;
+            continue;
+        }
+        if (*fmt == 'd')
+        {
+            int val = va_arg(ap, int);
+            char buf[32];
+            int m = 0;
+            unsigned int uv = (val < 0) ? -val : val;
+            if (val == 0)
+                buf[m++] = '0';
+            while (uv)
+            {
+                buf[m++] = '0' + (uv % 10);
+                uv /= 10;
+            }
+            if (val < 0)
+            {
+                if (n + 1 < outsz)
+                    out[n++] = '-';
+            }
+            while (m-- > 0 && n + 1 < outsz)
+                out[n++] = buf[m];
+            continue;
+        }
+        // 未支持的格式，输出占位符
+        if (n + 1 < outsz)
+            out[n++] = '%';
+        if (n + 1 < outsz)
+            out[n++] = *fmt;
+    }
+    out[n] = '\0';
+    va_end(ap);
+    return (int)n;
 }

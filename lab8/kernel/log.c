@@ -190,7 +190,7 @@ int klog_dump_to_console(void)
         avail--;
         // 直接使用 printf 的底层输出，避免递归日志
         uart_putc(c);
-        printed++;
+        printed++; 
     }
     release(&log_buf.lock);
     return printed;

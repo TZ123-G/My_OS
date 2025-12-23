@@ -7,6 +7,9 @@
 #define SYS_exit 3
 #define SYS_fork 4
 #define SYS_wait 5
+#define SYS_read 6
+#define SYS_open 7
+#define SYS_close 8
 
 #endif
 

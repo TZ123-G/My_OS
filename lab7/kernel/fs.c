@@ -4,13 +4,12 @@
 #include "fs.h"
 #include "spinlock.h"
 #include "printf.h"
-#include "log.h"
 
 #define ROOTINO 1
 #define IPB (BSIZE / sizeof(struct dinode))
 #define IBLOCK(i, sb) ((sb).inodestart + (i) / IPB)
 
-static struct superblock sb;
+struct superblock sb;
 static struct inode inodes[200];
 
 void iinit(void)
@@ -20,7 +19,7 @@ void iinit(void)
     sb.size = 1024;            // NBLOCKS in bio.c
     sb.nblocks = sb.size - 10; // simple
     sb.ninodes = 200;
-    sb.nlog = 0;
+    sb.nlog = 30;
     sb.logstart = 2;
     sb.inodestart = 10;
     sb.bmapstart = sb.inodestart + (sb.ninodes / IPB) + 1;
@@ -67,11 +66,11 @@ struct inode *ialloc(uint dev, short type)
             for (int i = 0; i < NDIRECT + 1; i++)
                 ip->addrs[i] = 0;
             ip->ref = 1;
-            klog(LOG_LEVEL_INFO, "ialloc: inum=%d type=%d", (int)ip->inum, (int)type);
+            // logging removed for lab7
             return ip;
         }
     }
-    klog(LOG_LEVEL_WARN, "ialloc: out of inodes");
+    // logging removed for lab7
     return 0;
 }
 
@@ -173,18 +172,17 @@ static uint bmap(struct inode *ip, uint bn)
                 // 避免将当前 inode 的间接表块再次当作数据块分配，导致表被文件数据覆盖
                 if (b == ip->addrs[NDIRECT])
                 {
-                    klog(LOG_LEVEL_WARN, "bmap: skipping indirect tbl block=%d", (int)b);
+                    // logging removed for lab7: skipping indirect table block
                     brelse(bb);
                     continue;
                 }
                 a[bn] = b;
-                bwrite(ib);
+                log_write(ib);
                 if (a[bn] >= NBLOCKS)
                 {
                     printf("bmap indirect OOR: bn=%d b=%d NBLOCKS=%d\n", (int)bn, (int)a[bn], (int)NBLOCKS);
                     brelse(bb);
                     brelse(ib);
-                    klog(LOG_LEVEL_FATAL, "bmap: indirect OOR bn=%d b=%d", (int)bn, (int)a[bn]);
                     panic("bmap: assigned indirect block out of range");
                 }
                 brelse(bb);
@@ -245,6 +243,7 @@ int writei(struct inode *ip, char *src, uint off, uint n)
 {
     if (off > ip->size)
         return -1;
+    begin_op();
     uint tot = 0;
     while (tot < n)
     {
@@ -256,13 +255,14 @@ int writei(struct inode *ip, char *src, uint off, uint n)
         uint bnum = bmap(ip, bn);
         struct buf *b = bread(0, bnum);
         memmove(b->data + boff, src + tot, towrite);
-        bwrite(b);
+        log_write(b);
         brelse(b);
         tot += towrite;
         off += towrite;
     }
     if (off > ip->size)
         ip->size = off;
+    end_op();
     return tot;
 }
 
@@ -270,6 +270,7 @@ void fs_init(void)
 {
     binit();
     iinit();
+    log_init();
     // create root inode if necessary
     struct inode *r = &inodes[ROOTINO];
     if (!r->valid)
@@ -334,4 +335,127 @@ struct inode *fs_inode_at(int idx)
     if (idx < 0 || idx >= (int)(sizeof(inodes) / sizeof(inodes[0])))
         return 0;
     return &inodes[idx];
+}
+
+// ------- simple pathname helpers (minimal) -------
+// dir lookup: search directory inode dp for name, return iget of target inode
+static struct inode *dirlookup(struct inode *dp, const char *name)
+{
+    if (!dp || !name)
+        return 0;
+    // read directory entries sequentially
+    int off = 0;
+    while (off + sizeof(struct dirent) <= (int)dp->size)
+    {
+        struct dirent de;
+        int r = readi(dp, (char *)&de, off, sizeof(de));
+        if (r != sizeof(de))
+            break;
+        if (de.inum != 0 && strcmp(de.name, name) == 0)
+        {
+            return iget(0, de.inum);
+        }
+        off += sizeof(de);
+    }
+    return 0;
+}
+
+// link a name in directory dp to inum
+static int dirlink(struct inode *dp, const char *name, uint inum)
+{
+    if (!dp || !name)
+        return -1;
+    // do not allow duplicate
+    if (dirlookup(dp, name))
+        return -1;
+    struct dirent de;
+    de.inum = (ushort)inum;
+    // copy name with DIRSIZ limit
+    int i;
+    for (i = 0; i < DIRSIZ && name[i]; i++)
+        de.name[i] = name[i];
+    for (; i < DIRSIZ; i++)
+        de.name[i] = '\0';
+    // append dirent
+    int off = dp->size;
+    writei(dp, (char *)&de, off, sizeof(de));
+    return 0;
+}
+
+// parse simple path: only supports absolute paths like "/name" or "/dir/name"
+struct inode *namei(const char *path)
+{
+    if (!path || path[0] != '/')
+        return 0;
+    // root
+    struct inode *cur = iget(0, ROOTINO);
+    if (!cur)
+        return 0;
+    // skip leading '/'
+    const char *p = path + 1;
+    if (*p == '\0')
+        return cur;
+    char name[DIRSIZ + 1];
+    while (1)
+    {
+        int i = 0;
+        while (*p && *p != '/' && i < DIRSIZ)
+            name[i++] = *p++;
+        name[i] = '\0';
+        struct inode *next = dirlookup(cur, name);
+        iput(cur);
+        if (!next)
+            return 0;
+        cur = next;
+        if (*p == '/')
+            p++;
+        if (*p == '\0')
+            break;
+    }
+    return cur;
+}
+
+struct inode *create(const char *path, short type)
+{
+    if (!path || path[0] != '/')
+        return 0;
+    // find parent directory and final name
+    const char *p = path + 1;
+    char name[DIRSIZ + 1];
+    struct inode *parent = iget(0, ROOTINO);
+    if (!parent)
+        return 0;
+    // if path is just "/name"
+    const char *slash = 0;
+    const char *q = p;
+    while (*q && *q != '/')
+        q++;
+    slash = (*q == '/') ? q : 0;
+    int nlen = (slash ? (int)(slash - p) : (int)strlen(p));
+    if (nlen <= 0 || nlen > DIRSIZ)
+    {
+        iput(parent);
+        return 0;
+    }
+    for (int i = 0; i < nlen; i++)
+        name[i] = p[i];
+    name[nlen] = '\0';
+
+    // check exists
+    if (dirlookup(parent, name))
+    {
+        iput(parent);
+        return 0; // already exists
+    }
+
+    struct inode *ip = ialloc(0, type);
+    if (!ip)
+    {
+        iput(parent);
+        return 0;
+    }
+    // link in parent
+    dirlink(parent, name, ip->inum);
+    iput(parent);
+    return ip;
 }

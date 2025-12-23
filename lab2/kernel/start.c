@@ -8,15 +8,23 @@ void main();
 // 在 .bss 段中分配一份足够大的空间作为栈空间而已
 __attribute__((aligned(16))) char stack0[4096];
 
-void start()
+void test_printf_basic()
 {
-    // 清零 .bss 段
-    for (char *p = _bss_start; p < _bss_end; p++)
-    {
-        *p = 0;
-    }
-    consoleinit();
+    printf("Testing integer: %d\n", 42);
+    printf("Testing negative: %d\n", -123);
+    printf("Testing zero: %d\n", 0);
+    printf("Testing hex: 0x%x\n", 0xABC);
+    printf("Testing string: %s\n", "Hello");
+    printf("Testing char: %c\n", 'X');
+    printf("Testing percent: %%\n");
+    printf("INT_MAX: %d\n", 2147483647);
+    printf("INT_MIN: %d\n", -2147483648);
+    printf("NULL string: %s\n", (char *)0);
+    printf("Empty string: %s\n", "");
+}
 
+void test_printf_color()
+{
     // 清屏
     clear_screen();
 
@@ -40,6 +48,17 @@ void start()
     // 组合使用功能
     goto_xy(1, 10); // 移动到第10行第1列
     printf_color(COLOR_CYAN, -1, ATTR_BOLD, "Combined: positioned text with color");
+}
+void start()
+{
+    // 清零 .bss 段
+    for (char *p = _bss_start; p < _bss_end; p++)
+    {
+        *p = 0;
+    }
+    consoleinit();
+    test_printf_basic();
+
 
     main();
 }

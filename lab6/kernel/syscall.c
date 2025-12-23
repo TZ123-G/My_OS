@@ -115,6 +115,11 @@ sys_write(void)
     argaddr(1, &addr);
     argint(2, &n);
 
+    // basic validation
+    if (n < 0)
+        return -1;
+    if (addr == 0)
+        return -1;
     if (fd != 1 && fd != 2)
         return -1;
 
@@ -124,10 +129,10 @@ sys_write(void)
     while (n > 0)
     {
         int chunk = n > (int)sizeof(buf) ? sizeof(buf) : n;
+        // require that user buffer is readable; fail safely if not
         if (copyin_user(p->pagetable, buf, addr, chunk) < 0)
         {
-            // fallback: maybe pointer is kernel pointer (used by tests)
-            memmove(buf, (void *)addr, chunk);
+            return -1;
         }
         for (int i = 0; i < chunk; i++)
             consputc(buf[i]);
@@ -136,6 +141,59 @@ sys_write(void)
         tot += chunk;
     }
     return tot;
+}
+
+static uint64
+sys_read(void)
+{
+    int fd;
+    uint64 addr;
+    int n;
+    argint(0, &fd);
+    argaddr(1, &addr);
+    argint(2, &n);
+
+    if (n < 0)
+        return -1;
+    if (addr == 0)
+        return -1;
+
+    // only support stdin (fd==0) in this simplified kernel
+    if (fd != 0)
+        return -1;
+
+    // no interactive input available: return 0 (EOF)
+    return 0;
+}
+
+static uint64
+sys_open(void)
+{
+    char path[128];
+    int flags;
+    if (argstr(0, path, sizeof(path)) < 0)
+        return -1;
+    argint(1, &flags);
+
+    // accept common console device names and map to stdout fd (1)
+    if (strcmp(path, "/dev/console") == 0 || strcmp(path, "console") == 0)
+    {
+        return 1;
+    }
+    return -1;
+}
+
+static uint64
+sys_close(void)
+{
+    int fd;
+    argint(0, &fd);
+    if (fd < 0)
+        return -1;
+    // allow closing standard fds; no-op in this simplified kernel
+    if (fd == 0 || fd == 1 || fd == 2)
+        return 0;
+    return -1;
 }
 
 static uint64
@@ -170,6 +228,9 @@ sys_wait(void)
 // syscall table
 static uint64 (*syscalls[])(void) = {
     [SYS_write] sys_write,
+    [SYS_read] sys_read,
+    [SYS_open] sys_open,
+    [SYS_close] sys_close,
     [SYS_getpid] sys_getpid,
     [SYS_exit] sys_exit,
     [SYS_fork] sys_fork,

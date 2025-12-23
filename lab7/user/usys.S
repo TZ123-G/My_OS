@@ -29,8 +29,20 @@ wait:
     ecall
     ret
 
-.global klog
-klog:
-    li a7, SYS_klog
+.global read
+read:
+    li a7, SYS_read
+    ecall
+    ret
+
+.global open
+open:
+    li a7, SYS_open
+    ecall
+    ret
+
+.global close
+close:
+    li a7, SYS_close
     ecall
     ret

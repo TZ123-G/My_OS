@@ -854,6 +854,6 @@ void start()
     {
         *p = 0;
     }
-    klog_functional_test();
+    test_filesystem_performance();
     main();
 }

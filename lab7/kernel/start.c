@@ -11,7 +11,6 @@
 #include "proc.h"
 #include "fs.h"
 
-
 extern char _bss_start[], _bss_end[];
 
 void main();
@@ -233,7 +232,6 @@ void test_store_null(void)
     *bad = 0xdeadbeef;
     printf("Store to NULL test completed successfully!\n");
 }
-
 
 // 测量中断处理开销的测试
 void test_interrupt_overhead(void)
@@ -468,6 +466,151 @@ void test_syscall(void)
     tf.a7 = SYS_getpid;
     syscall();
     printf("test_syscall: getpid returned %d\n", (int)tf.a0);
+
+    setproc(old);
+}
+
+// 适配内核的参数传递测试：通过伪造 proc/trapframe 调用 syscall()
+void test_parameter_passing(void)
+{
+    printf("Running test_parameter_passing...\n");
+    uartinit();
+    consoleinit();
+    pmem_init();
+    kvminit();
+    procinit();
+
+    struct trapframe tf;
+    struct proc fakep;
+    memset(&tf, 0, sizeof(tf));
+    memset(&fakep, 0, sizeof(fakep));
+    fakep.trapframe = &tf;
+    extern pagetable_t kernel_pagetable;
+    fakep.pagetable = kernel_pagetable;
+    fakep.pid = 2;
+    strncpy(fakep.name, "ptest", sizeof(fakep.name));
+
+    struct proc *old = myproc();
+    setproc(&fakep);
+
+    static char buffer[] = "Hello, World!\n";
+    static char path[] = "/dev/console";
+
+    // open
+    tf.a7 = SYS_open;
+    tf.a0 = (uint64)path;
+    tf.a1 = 0; // flags (ignored in our simple sys_open)
+    syscall();
+    int fd = (int)tf.a0;
+    printf("open returned %d\n", fd);
+
+    if (fd >= 0)
+    {
+        // write
+        tf.a7 = SYS_write;
+        tf.a0 = fd;
+        tf.a1 = (uint64)buffer;
+        tf.a2 = (int)strlen(buffer);
+        syscall();
+        printf("write returned %d\n", (int)tf.a0);
+
+        // close
+        tf.a7 = SYS_close;
+        tf.a0 = fd;
+        syscall();
+        printf("close returned %d\n", (int)tf.a0);
+    }
+
+    // boundary cases
+    // invalid fd
+    tf.a7 = SYS_write;
+    tf.a0 = -1;
+    tf.a1 = (uint64)buffer;
+    tf.a2 = 10;
+    syscall();
+    printf("write(-1, buffer, 10) = %d\n", (int)tf.a0);
+
+    // NULL pointer
+    tf.a7 = SYS_write;
+    tf.a0 = fd >= 0 ? fd : 1;
+    tf.a1 = 0;
+    tf.a2 = 10;
+    syscall();
+    printf("write(fd, NULL, 10) = %d\n", (int)tf.a0);
+
+    // negative length
+    tf.a7 = SYS_write;
+    tf.a0 = fd >= 0 ? fd : 1;
+    tf.a1 = (uint64)buffer;
+    tf.a2 = -1;
+    syscall();
+    printf("write(fd, buffer, -1) = %d\n", (int)tf.a0);
+
+    setproc(old);
+}
+
+// 适配内核的安全性测试：无效用户指针、缓冲区边界与权限检查
+void test_security(void)
+{
+    printf("Running test_security...\n");
+    uartinit();
+    consoleinit();
+    pmem_init();
+    kvminit();
+    procinit();
+
+    struct trapframe tf;
+    struct proc fakep;
+    memset(&tf, 0, sizeof(tf));
+    memset(&fakep, 0, sizeof(fakep));
+    fakep.trapframe = &tf;
+    extern pagetable_t kernel_pagetable;
+    fakep.pagetable = kernel_pagetable;
+    fakep.pid = 3;
+    strncpy(fakep.name, "scktest", sizeof(fakep.name));
+
+    struct proc *old = myproc();
+    setproc(&fakep);
+
+    // invalid pointer write
+    char *invalid_ptr = (char *)0x1000000;
+    tf.a7 = SYS_write;
+    tf.a0 = 1;
+    tf.a1 = (uint64)invalid_ptr;
+    tf.a2 = 10;
+    syscall();
+    printf("Invalid pointer write result: %d\n", (int)tf.a0);
+
+    // read into too-small buffer
+    char small_buf[4];
+    tf.a7 = SYS_read;
+    tf.a0 = 0;
+    tf.a1 = (uint64)small_buf;
+    tf.a2 = 1000;
+    syscall();
+    printf("read(0, small_buf, 1000) = %d\n", (int)tf.a0);
+
+    // permission check: open as read-only then try write
+    static char cons[] = "/dev/console";
+    tf.a7 = SYS_open;
+    tf.a0 = (uint64)cons;
+    tf.a1 = 0; // O_RDONLY (not enforced by our sys_open)
+    syscall();
+    int rfd = (int)tf.a0;
+    printf("open(/dev/console,O_RDONLY) = %d\n", rfd);
+    if (rfd >= 0)
+    {
+        tf.a7 = SYS_write;
+        tf.a0 = rfd;
+        tf.a1 = (uint64) "X";
+        tf.a2 = 1;
+        syscall();
+        printf("write(readonly_fd, \"X\",1) = %d\n", (int)tf.a0);
+
+        tf.a7 = SYS_close;
+        tf.a0 = rfd;
+        syscall();
+    }
 
     setproc(old);
 }
@@ -790,6 +933,75 @@ void test_filesystem_performance(void)
     printf("Small files (1000x4B): %d cycles\n", (int)small_files_time);
     printf("Large file (1x4MB): %d cycles\n", (int)large_file_time);
 }
+
+// Crash recovery test: 可直接在 start() 中调用
+#define T_FILE 1
+
+void test_crash_recovery(void)
+{
+    consoleinit();
+    printf("=== Crash recovery test (kernel) ===\n");
+
+    fs_init();
+    fileinit();
+
+    const int NUM = 100; // 可按需调整
+    char name[64];
+    const char *payload = "crash-test-data\n";
+    int errors = 0;
+
+    // 如果第一个文件已存在，认为是重启后的检查阶段
+    if (namei("/crashf0") != 0)
+    {
+        printf("Post-crash: verifying %d files...\n", NUM);
+        for (int i = 0; i < NUM; i++)
+        {
+            snprintf(name, sizeof(name), "/crashf%d", i);
+            struct inode *ip = namei(name);
+            if (!ip)
+            {
+                printf("MISSING %s\n", name);
+                errors++;
+                continue;
+            }
+            char buf[128];
+            int n = readi(ip, buf, 0, sizeof(buf) - 1);
+            iput(ip);
+            if (n <= 0 || strstr(buf, "crash-test") == 0)
+            {
+                printf("CORRUPT %s (read=%d)\n", name, n);
+                errors++;
+            }
+        }
+        if (errors == 0)
+            printf("RECOVERY OK: all %d files present and readable\n", NUM);
+        else
+            printf("RECOVERY FAIL: %d errors\n", errors);
+        return;
+    }
+
+    // 首次运行：创建大量文件并写入，然后触发 panic 模拟崩溃
+    printf("First run: creating %d files then triggering panic...\n", NUM);
+    for (int i = 0; i < NUM; i++)
+    {
+        snprintf(name, sizeof(name), "/crashf%d", i);
+        struct inode *ip = create(name, T_FILE);
+        if (!ip)
+        {
+            printf("create failed %s\n", name);
+            continue;
+        }
+        writei(ip, (char *)payload, 0, (int)strlen(payload));
+        iput(ip);
+        if ((i & 15) == 0)
+        {
+            printf(".");
+        }
+    }
+    printf("\nFiles created. Triggering panic now to simulate crash.\n");
+    panic("test_crash_recovery: user-triggered crash");
+}
+
 void start()
 {
     // 清零 .bss 段
@@ -798,6 +1010,6 @@ void start()
         *p = 0;
     }
 
-    test_syscall();
+    test_security();
     main();
 }
